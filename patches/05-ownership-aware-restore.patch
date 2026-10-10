@@ -1,0 +1,341 @@
+--- a/vivobook_optimize_v16.sh
++++ b/vivobook_optimize_v16.sh
+@@ -803,6 +803,93 @@
+ # Always returns 0: a missing or unmanaged file is not an error.
+ I915_CONF_REMOVED=false
+ 
++# ---- v16 (change 5): ownership-aware restore helpers -------------------------
++# --restore-defaults removes a path only when this script owns it: the
++# "Managed by vivobook_optimize" marker (written into every unit, helper, hook,
++# /etc/default file and udev rule since v15.3, I-18), or — where an explicit
++# second argument is given — the same normalized legacy content rule that the
++# write path already uses (managed_or_legacy_adoptable). Anything else is
++# preserved and listed at the end. v15.3 removed these paths unconditionally.
++RESTORE_SKIPPED=()
++RESTORE_FAILED=()
++
++# restore_remove_owned <path> [legacy_norm]
++# Returns 0 when the path is gone afterwards (absent, removed, or would be
++# removed in dry-run), 1 when it was preserved or the removal failed.
++restore_remove_owned() {
++  local f="$1" legacy_norm="${2:-}" owned=false norm=""
++  [[ -e "$f" || -L "$f" ]] || return 0
++  if is_managed_file "$f"; then
++    owned=true
++  elif [[ -n "$legacy_norm" && -f "$f" ]]; then
++    norm="$(command sed -e 's/#.*$//' -e 's/[[:space:]]//g' "$f" 2>/dev/null | tr -d '\n' || true)"
++    [[ "$norm" == "$legacy_norm" ]] && owned=true
++  fi
++  if [[ "$owned" != true ]]; then
++    echo "   SKIPPED (not script-managed, preserved): $f"
++    RESTORE_SKIPPED+=("$f")
++    return 1
++  fi
++  if [[ "$DRY_RUN" == true ]]; then
++    echo "[DRY-RUN] Would remove (script-managed): $f"
++    return 0
++  fi
++  command rm -f "$f" 2>/dev/null || true
++  if [[ -e "$f" || -L "$f" ]]; then
++    echo "   WARNING: could not remove $f" >&2
++    RESTORE_FAILED+=("$f")
++    return 1
++  fi
++  return 0
++}
++
++# restore_unit_owned <unit>: disable+stop and remove a unit ONLY when its file
++# under /etc/systemd/system is script-managed. An unmarked unit of the same
++# name (admin-written, or from another tool) is neither stopped nor removed.
++restore_unit_owned() {
++  local unit="$1" upath="/etc/systemd/system/$1"
++  [[ -e "$upath" || -L "$upath" ]] || return 0
++  if ! is_managed_file "$upath"; then
++    echo "   SKIPPED (not script-managed, preserved; not disabled): $upath"
++    RESTORE_SKIPPED+=("$upath")
++    return 1
++  fi
++  if [[ "$DRY_RUN" == true ]]; then
++    echo "[DRY-RUN] Would disable --now $unit"
++  else
++    systemctl disable --now "$unit" >/dev/null 2>&1 || true
++  fi
++  restore_remove_owned "$upath"
++}
++
++# PPD state file written by step 15c. Marked since v15.3; earlier versions wrote
++# the same four PPD_WAS_* assignments without a marker (the file is created only
++# once, so an old copy can survive upgrades). Such a file is recognised by its
++# content. It is parsed, never sourced.
++ppd_state_file_owned() {
++  local f="$1" line
++  [[ -f "$f" ]] || return 1
++  is_managed_file "$f" && return 0
++  while IFS= read -r line || [[ -n "$line" ]]; do
++    line="${line%%#*}"
++    line="${line//[[:space:]]/}"
++    [[ -z "$line" ]] && continue
++    [[ "$line" =~ ^PPD_WAS_(PRESENT|ACTIVE|ENABLED|MASKED)=\"?(true|false)\"?$ ]] || return 1
++  done < "$f"
++  return 0
++}
++ppd_state_value() {
++  local f="$1" key="$2" line v=false
++  while IFS= read -r line || [[ -n "$line" ]]; do
++    line="${line%%#*}"
++    line="${line//[[:space:]]/}"
++    line="${line//\"/}"
++    [[ "$line" == "$key="* ]] && v="${line#*=}"
++  done < "$f"
++  [[ "$v" == true ]] || v=false
++  printf '%s\n' "$v"
++}
++
+ remove_i915_conf() {
+   [[ -e "$I915_CONF" ]] || return 0
+   if grep -q "Managed by vivobook_optimize" "$I915_CONF" 2>/dev/null ||
+@@ -1120,6 +1207,10 @@
+ 
+ restore_defaults() {
+   echo "== Restoring ASUS Vivobook v16 managed defaults =="
++  RESTORE_SKIPPED=()
++  RESTORE_FAILED=()
++  # v16 (change 5): ownership-aware. Each unit is disabled/stopped and removed
++  # only when /etc/systemd/system/<unit> carries the script marker.
+   local unit
+   for unit in \
+     powertop-autotune.service \
+@@ -1132,10 +1223,21 @@
+     system-maintenance.service \
+     system-maintenance.timer
+   do
+-    systemctl disable --now "$unit" >/dev/null 2>&1 || true
+-    rm -f "/etc/systemd/system/$unit"
++    restore_unit_owned "$unit" || true
+   done
+-  systemctl disable --now zramswap.service >/dev/null 2>&1 || true
++  # zram ownership is captured BEFORE the configs are removed below: the legacy
++  # zramswap.service and the live /dev/zram0 detach are only touched when one of
++  # the zram configs was script-managed.
++  local ZRAM_TOOLS_WAS_MANAGED=false ZRAM_GEN_WAS_MANAGED=false
++  is_managed_file /etc/default/zramswap && ZRAM_TOOLS_WAS_MANAGED=true
++  is_managed_file /etc/systemd/zram-generator.conf && ZRAM_GEN_WAS_MANAGED=true
++  if [[ "$ZRAM_TOOLS_WAS_MANAGED" == true ]]; then
++    if [[ "$DRY_RUN" == true ]]; then
++      echo "[DRY-RUN] Would disable --now zramswap.service (script-managed /etc/default/zramswap)"
++    else
++      systemctl disable --now zramswap.service >/dev/null 2>&1 || true
++    fi
++  fi
+ 
+   # Transient runtime lock files created by the v13/v15.1 helpers. Safe to
+   # remove while helpers are stopped; /run is tmpfs anyway. The main
+@@ -1144,31 +1246,39 @@
+   rm -f /run/vivobook-power-switch.lock
+   rm -f /run/system-maintenance.lock
+ 
+-  rm -f /usr/local/bin/system-maintenance.sh
+-  rm -f /usr/local/bin/set-battery-threshold.sh
+-  rm -f /usr/local/bin/set-asus-thermal-profile.sh
+-  rm -f /usr/local/bin/set-intel-epp.sh
+-  rm -f /usr/local/bin/vivobook-power-switch.sh
+-  rm -f /usr/local/bin/set-rapl-limits.sh
+-  rm -f /usr/local/bin/vivobook-kbd-timeout.sh
+-  rm -f /usr/lib/systemd/system-sleep/vivobook-battery
+-  rm -f /usr/lib/systemd/system-sleep/vivobook-thermal-profile
+-  rm -f /usr/lib/systemd/system-sleep/vivobook-intel-epp
+-  rm -f /usr/lib/systemd/system-sleep/vivobook-kbd-timeout
+-
+-  rm -f /etc/default/vivobook-battery
+-  rm -f /etc/default/vivobook-thermal-profile
+-  rm -f /etc/default/vivobook-epp
+-  rm -f /etc/default/vivobook-rapl
+-  remove_managed_config /etc/default/zramswap
+-  remove_managed_config /etc/systemd/zram-generator.conf
++  # v16 (change 5): helpers, sleep hooks and /etc/default state files are
++  # removed only when script-managed; unmarked copies are preserved and listed.
++  local owned_path
++  for owned_path in \
++    /usr/local/bin/system-maintenance.sh \
++    /usr/local/bin/set-battery-threshold.sh \
++    /usr/local/bin/set-asus-thermal-profile.sh \
++    /usr/local/bin/set-intel-epp.sh \
++    /usr/local/bin/vivobook-power-switch.sh \
++    /usr/local/bin/set-rapl-limits.sh \
++    /usr/local/bin/vivobook-kbd-timeout.sh \
++    /usr/lib/systemd/system-sleep/vivobook-battery \
++    /usr/lib/systemd/system-sleep/vivobook-thermal-profile \
++    /usr/lib/systemd/system-sleep/vivobook-intel-epp \
++    /usr/lib/systemd/system-sleep/vivobook-kbd-timeout \
++    /etc/default/vivobook-battery \
++    /etc/default/vivobook-thermal-profile \
++    /etc/default/vivobook-epp \
++    /etc/default/vivobook-rapl \
++    /etc/default/zramswap \
++    /etc/systemd/zram-generator.conf
++  do
++    restore_remove_owned "$owned_path" || true
++  done
+ 
+   # v15.3 (I-07): removing the generator config does not detach an already
+   # live /dev/zram0 swap device, and step 16 already knows this matters. Do it
+   # here too, so 'swapon --show' does not keep listing a stale zram device
+   # after a restore. The detach is guarded and reports failure instead of
+-  # swallowing it.
+-  if [[ -e /dev/zram0 ]] || systemctl is-active --quiet systemd-zram-setup@zram0.service 2>/dev/null; then
++  # swallowing it. v16 (change 5): only when a script-managed zram config was
++  # present — a zram device configured by the admin is left alone.
++  if [[ "$ZRAM_TOOLS_WAS_MANAGED" == true || "$ZRAM_GEN_WAS_MANAGED" == true ]] &&
++     { [[ -e /dev/zram0 ]] || systemctl is-active --quiet systemd-zram-setup@zram0.service 2>/dev/null; }; then
+     systemctl stop systemd-zram-setup@zram0.service >/dev/null 2>&1 || true
+     if [[ -e /dev/zram0 ]]; then
+       if ! swapoff /dev/zram0 2>/dev/null; then
+@@ -1181,15 +1291,20 @@
+   # v15.3 (I-08): remember whether this script installed the BBR sysctl.
+   # Removing a sysctl.d file does not reset the live value, and the BBR
+   # default_qdisc/tcp_congestion_control pair is exactly that case.
++  # v16 (change 5): the BBR pair also honours the v15.3 legacy-adoption rule
++  # (managed_or_legacy_adoptable): an unmarked file with exactly the content
++  # older releases wrote counts as script-owned, as it does on the write path.
++  local BBR_SYSCTL_LEGACY="net.core.default_qdisc=fqnet.ipv4.tcp_congestion_control=bbr"
+   BBR_CONF_WAS_MANAGED=false
+-  if is_managed_file /etc/sysctl.d/98-network-bbr.conf; then
++  if [[ -e /etc/sysctl.d/98-network-bbr.conf ]] &&
++     managed_or_legacy_adoptable /etc/sysctl.d/98-network-bbr.conf "$BBR_SYSCTL_LEGACY"; then
+     BBR_CONF_WAS_MANAGED=true
+   fi
+ 
+-  remove_managed_config /etc/sysctl.d/99-vivobook.conf
+-  remove_managed_config /etc/sysctl.d/98-network-bbr.conf
+-  remove_managed_config /etc/modules-load.d/bbr.conf
+-  remove_managed_config /etc/modprobe.d/audio-powersave.conf
++  restore_remove_owned /etc/sysctl.d/99-vivobook.conf || true
++  restore_remove_owned /etc/sysctl.d/98-network-bbr.conf "$BBR_SYSCTL_LEGACY" || true
++  restore_remove_owned /etc/modules-load.d/bbr.conf "tcp_bbr" || true
++  restore_remove_owned /etc/modprobe.d/audio-powersave.conf || true
+ 
+   # v16 (change 2): the disable_aspm=1 workaround is an OPTIONAL fallback. On
+   # the reference machine (kernel 7.2.6) Wi-Fi is stable without it and it was
+@@ -1200,7 +1315,7 @@
+     echo "   NOTE: Re-stage it only if the Wi-Fi link becomes unstable on your kernel:"
+     echo "   NOTE:   sudo bash $SCRIPT_PATH --with-mt7921e-aspm"
+   fi
+-  remove_managed_config "$MT7921E_CONF"
++  restore_remove_owned "$MT7921E_CONF" || true
+ 
+   restore_iwlwifi_conf
+   remove_i915_conf
+@@ -1220,22 +1335,31 @@
+     echo "[DRY-RUN] i915 parameters above (update-initramfs -u -k all)."
+   fi
+ 
+-  remove_managed_config /etc/wireplumber/wireplumber.conf.d/50-alsa-powersave.conf
+-  remove_managed_config /etc/wireplumber/main.lua.d/50-alsa-powersave.lua
++  restore_remove_owned /etc/wireplumber/wireplumber.conf.d/50-alsa-powersave.conf || true
++  restore_remove_owned /etc/wireplumber/main.lua.d/50-alsa-powersave.lua || true
+ 
+-  # Remove udev rules
+-  rm -f /etc/udev/rules.d/99-vivobook-power.rules
+-  rm -f /etc/udev/rules.d/99-vivobook-nvme.rules
+-  rm -f /etc/udev/rules.d/99-usb-autosuspend.rules
++  # Remove udev rules (v16 (change 5): script-managed ones only)
++  restore_remove_owned /etc/udev/rules.d/99-vivobook-power.rules || true
++  restore_remove_owned /etc/udev/rules.d/99-vivobook-nvme.rules || true
++  restore_remove_owned /etc/udev/rules.d/99-usb-autosuspend.rules || true
+ 
+   # Remove environment.d snippet
+-  remove_managed_config /etc/environment.d/99-vivobook-vaapi.conf
++  restore_remove_owned /etc/environment.d/99-vivobook-vaapi.conf || true
+ 
+-  # Restore power-profiles-daemon if masked by this script
+-  if [[ -f /etc/default/vivobook-ppd-state ]]; then
+-    local PPD_WAS_PRESENT="false" PPD_WAS_ACTIVE="false" PPD_WAS_ENABLED="false" PPD_WAS_MASKED="false"
+-    # shellcheck disable=SC1091
+-    . /etc/default/vivobook-ppd-state 2>/dev/null || true
++  # Restore power-profiles-daemon if masked by this script.
++  # v16 (change 5): only from a state file this script owns (marker, or the
++  # exact pre-marker PPD_WAS_* format); it is parsed, not sourced.
++  if [[ -f /etc/default/vivobook-ppd-state ]] && ! ppd_state_file_owned /etc/default/vivobook-ppd-state; then
++    echo "   SKIPPED (not script-managed, preserved): /etc/default/vivobook-ppd-state"
++    echo "   power-profiles-daemon was NOT unmasked/re-enabled; inspect that file and"
++    echo "   run 'systemctl unmask power-profiles-daemon.service' yourself if wanted."
++    RESTORE_SKIPPED+=("/etc/default/vivobook-ppd-state")
++  elif [[ -f /etc/default/vivobook-ppd-state ]]; then
++    local PPD_WAS_PRESENT PPD_WAS_ACTIVE PPD_WAS_ENABLED PPD_WAS_MASKED
++    PPD_WAS_PRESENT="$(ppd_state_value /etc/default/vivobook-ppd-state PPD_WAS_PRESENT)"
++    PPD_WAS_ACTIVE="$(ppd_state_value /etc/default/vivobook-ppd-state PPD_WAS_ACTIVE)"
++    PPD_WAS_ENABLED="$(ppd_state_value /etc/default/vivobook-ppd-state PPD_WAS_ENABLED)"
++    PPD_WAS_MASKED="$(ppd_state_value /etc/default/vivobook-ppd-state PPD_WAS_MASKED)"
+     if [[ "$PPD_WAS_PRESENT" == "true" ]]; then
+       if [[ "$PPD_WAS_MASKED" == "false" ]]; then
+         systemctl unmask power-profiles-daemon.service >/dev/null 2>&1 || true
+@@ -1247,7 +1371,11 @@
+         fi
+       fi
+     fi
+-    rm -f /etc/default/vivobook-ppd-state
++    if [[ "$DRY_RUN" == true ]]; then
++      echo "[DRY-RUN] Would remove (script-managed): /etc/default/vivobook-ppd-state"
++    else
++      command rm -f /etc/default/vivobook-ppd-state
++    fi
+   fi
+ 
+   # Restore user browser flags
+@@ -1262,6 +1390,10 @@
+   done < /etc/passwd
+ 
+   # Restore original CPU turbo state.
++  # v16 (change 5): this and the igpu-defaults file below keep their v15.3
++  # legacy rule (removed after use): no v15.x/v16 code path writes them, so
++  # they can only come from pre-v15 releases of this script, which predate the
++  # marker.
+   # LEGACY (pre-v15 installs only, I-32): no v15.x code path writes
+   # /etc/default/vivobook-pstate-defaults. The branch is kept so a machine
+   # still carrying the file from an older release can restore no_turbo.
+@@ -1396,6 +1528,24 @@
+   echo "CPU max_perf_pct reset to 100 where writable; swappiness, writeback and (when BBR was managed) tcp_congestion_control reset, then distro sysctls reapplied."
+   echo "Reboot to reset remaining live module, RAPL, and other hardware settings."
+   echo "No apt packages were removed."
++  # v16 (change 5): list what was preserved so nothing is silently left behind.
++  if (( ${#RESTORE_SKIPPED[@]} > 0 )); then
++    echo "Preserved ${#RESTORE_SKIPPED[@]} path(s) without the 'Managed by vivobook_optimize' marker:"
++    local rs
++    for rs in ${RESTORE_SKIPPED[@]+"${RESTORE_SKIPPED[@]}"}; do
++      echo "  - $rs"
++    done
++    echo "If one of them was written by a pre-v15.3 release of this script (before markers),"
++    echo "check its content and remove it manually."
++  fi
++  if (( ${#RESTORE_FAILED[@]} > 0 )); then
++    echo "WARNING: ${#RESTORE_FAILED[@]} script-managed path(s) could not be removed:" >&2
++    local rf
++    for rf in ${RESTORE_FAILED[@]+"${RESTORE_FAILED[@]}"}; do
++      echo "  - $rf" >&2
++    done
++  fi
++  (( ${#RESTORE_FAILED[@]} == 0 ))
+ }
+ 
+ log_summary() {
+@@ -3122,7 +3272,10 @@
+ fi
+ 
+ if [[ "$RESTORE_DEFAULTS" == true ]]; then
+-  restore_defaults
++  # v16 (change 5): honest exit code — 1 when a script-managed path could not
++  # be removed (restore_defaults lists them).
++  RESTORE_RC=0
++  restore_defaults || RESTORE_RC=$?
+   log_summary "$@"
+   # v15.3 (I-12): the closing banner is printed at the END of the output. v15.2
+   # printed it here — before hundreds of simulated "[DRY-RUN] -> Write file"
+@@ -3130,7 +3283,7 @@
+   if [[ "$DRY_RUN" == true ]]; then
+     echo "=== END DRY RUN — no files were modified. ==="
+   fi
+-  exit 0
++  exit "$RESTORE_RC"
+ fi
+ 
+ # ---- Power-management ownership report (v15.2) ------------------------------

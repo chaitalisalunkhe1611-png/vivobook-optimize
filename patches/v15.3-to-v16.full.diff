@@ -1,0 +1,2479 @@
+--- a/vivobook_optimize_v15.3.sh
++++ b/vivobook_optimize_v16.sh
+@@ -1,8 +1,37 @@
+ #!/usr/bin/env bash
+ #
+-# ASUS Vivobook 16 (X1605VA) — Optimization Pass v15.3
++# ASUS Vivobook 16 (X1605VA) — Optimization Pass v16.0
+ # i5-13420H (Raptor Lake-H, 4P+4E) / Intel UHD iGPU / 16GB DDR4 / Micron NVMe
+ #
++# v16.0 — drift-correction release. NO new flags, services or managed files.
++# Baseline: kernel 7.2.6, S0ix functional, mt7921e ASPM workaround removed,
++# PL1 firmware-locked (200 W), PL2=45 W, no charge cap. Changes:
++#  1 --safe-mode-check: mt7921e item is informational (live disable_aspm and
++#    config shown separately; WARN, exit 0, only on kernel-log errors)
++#  2 ASPM-workaround wording is state-driven; --with-mt7921e-aspm is an
++#    OPTIONAL fallback; JSON adds aspm_workaround_live
++#  3 version 16.0, JSON schema 3 (additive keys; i915.module follows the bound
++#    driver); generated headers say v16 (one-time rewrite on the first run)
++#  4 --status/--status-json are read-only: no RAPL write-back lock probe
++#    (probe kept only in the mutating --pl1/--pl2 path)
++#  5 --restore-defaults is ownership-aware: only marker-owned (or v15.3
++#    legacy-rule) units/helpers/hooks/defaults/udev rules are removed;
++#    unmarked paths are preserved and listed
++#  6 audio: a marked audio-powersave.conf with hand-edited options is kept on
++#    the SOF path; [HD Audio power save] status + "audio" JSON (staged vs live)
++#  7 sleep hooks restart a unit only while it is enabled; existing managed
++#    hooks are refreshed in place; status shows enabled/installed-disabled/
++#    not-installed and flags unguarded v15.3 hooks
++#  8 --safe-mode-check also verifies the newest installed /boot/vmlinuz-*
++#  9 status/JSON report the BOUND DRM driver (xe), not a merely loaded i915
++# 10 PC6 + validated S0i2/S0i3 substate residency (else "unavailable")
++# 11 battery health falls back to energy_full/energy_full_design (uWh)
++# 12 unmanaged sysctl files that also set managed keys are reported (never
++#    edited), e.g. /etc/sysctl.d/99-bbr.conf re-applying BBR after restore
++# 13 --battery-limit=off reports what actually happened
++# 14 dry-run / summary flag echo include mt7921e-aspm
++# 15 read-only USB exempt-class power/control diagnostic (MISMATCH on auto)
++#
+ # v15.3 — correctness/completeness release (new flags: --with-mt7921e-aspm,
+ # --version, --safe-mode-check). Fixes: I-01 per-constraint RAPL lock probe;
+ # I-02 live-firmware PL2 check; I-03 MT7902 ASPM workaround; I-04 PPD read-back;
+@@ -60,12 +89,15 @@
+ #   sudo bash __SCRIPT_NAME__ --with-bbr                         enable TCP BBR congestion control + FQ qdisc
+ #   sudo bash __SCRIPT_NAME__ --with-browser-wayland               configure Ozone platform auto-detection for Wayland browsers
+ #                                                                (--with-browser-vaapi remains a compatibility alias)
+-#   sudo bash __SCRIPT_NAME__ --with-mt7921e-aspm                stage the MediaTek MT7902 (mt7921e) ASPM workaround:
+-#                                                                /etc/modprobe.d/mt7921e.conf with
+-#                                                                'options mt7921e disable_aspm=1'. Required for Wi-Fi
+-#                                                                link stability on this platform; needs a reboot (no
+-#                                                                initramfs rebuild). Unmanaged files are never
+-#                                                                overwritten. Not gated by TLP.
++#   sudo bash __SCRIPT_NAME__ --with-mt7921e-aspm                OPTIONAL fallback: stage the MediaTek MT7902 (mt7921e)
++#                                                                ASPM workaround /etc/modprobe.d/mt7921e.conf with
++#                                                                'options mt7921e disable_aspm=1'. Use it only if the
++#                                                                Wi-Fi link is actually unstable on your kernel. It
++#                                                                blocks PCIe L1.x on the Wi-Fi link; on the reference
++#                                                                machine it kept PC6/PC8/S0i3 at 0 until it was removed
++#                                                                on kernel 7.2.6 (Wi-Fi stable without it). Needs a
++#                                                                reboot (no initramfs rebuild). Unmanaged files are
++#                                                                never overwritten. Not gated by TLP.
+ #   sudo bash __SCRIPT_NAME__ --with-usb-autosuspend             enable USB runtime autosuspend (exempting USB HID,
+ #                                                                Bluetooth/wireless controllers, USB audio class 01
+ #                                                                and UVC video class 0e)
+@@ -91,11 +123,14 @@
+ #                                                                more detail, e.g. C-state residency, when run as root)
+ #   bash __SCRIPT_NAME__ --check                                 alias for --status
+ #   bash __SCRIPT_NAME__ --status-json                           machine-readable system telemetry (sudo optional)
+-#   bash __SCRIPT_NAME__ --safe-mode-check                       read-only boot/Wi-Fi integrity gate. Runs the checks
+-#                                                                from I-19/I-34 (kernel signing hook, stock-kernel
+-#                                                                pin, running-kernel signature, Secure Boot, mt7921e
+-#                                                                ASPM workaround) and exits 1 listing anything
+-#                                                                missing — do not reboot until they are resolved
++#   bash __SCRIPT_NAME__ --safe-mode-check                       read-only boot-integrity gate. Hard gates: kernel
++#                                                                signing hook, stock-kernel pin, running-kernel
++#                                                                signature and Secure Boot; exits 1 listing anything
++#                                                                missing — do not reboot until they are resolved.
++#                                                                The mt7921e Wi-Fi item is INFORMATIONAL: it shows the
++#                                                                live disable_aspm value and the config state, and
++#                                                                WARNs (exit still 0) only when mt7921e errors appear
++#                                                                in this boot's kernel log
+ #   bash __SCRIPT_NAME__ --version                               print script name, version and JSON schema; exit 0
+ #   sudo bash __SCRIPT_NAME__ --skip-update                      skip steps 1-3 (rapid configuration pass)
+ #   sudo bash __SCRIPT_NAME__ --with-full-upgrade                use apt-get full-upgrade instead of upgrade
+@@ -134,8 +169,10 @@
+ SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || printf '%s' "${BASH_SOURCE[0]:-$0}")"
+ SCRIPT_NAME="$(basename "$SCRIPT_PATH")"
+ # v15.3 (I-20): the JSON schema is versioned so consumers can detect changes.
+-SCRIPT_VERSION="15.3"
+-SCRIPT_SCHEMA=2
++# v16 (change 3): schema 3 only ADDS keys to schema 2, with one exception:
++# i915.module now names the BOUND DRM driver (xe on this machine).
++SCRIPT_VERSION="16.0"
++SCRIPT_SCHEMA=3
+ DEFAULTS_FILE="/etc/vivobook-optimize/defaults.conf"
+ I915_CONF="/etc/modprobe.d/vivobook-i915.conf"
+ 
+@@ -170,6 +207,8 @@
+ SAFE_MODE_CHECK=false
+ # v15.2: even with this set, --with-auto-power still refuses to run under TLP.
+ FORCE_TLP_OVERRIDE=false
++# v16 (change 2): set by step 17a only when it actually staged mt7921e.conf.
++MT7921E_STAGED_THIS_RUN=false
+ 
+ MANAGED_BROWSER_FLAGS=(
+   "--ozone-platform-hint=auto"
+@@ -526,8 +565,19 @@
+   printf '%s\n' "${v:-unavailable}"
+ }
+ 
+-# The mt7921e ASPM workaround is what keeps PC8/PC10 at zero on this platform
+-# (I-22), whether it comes from the live module parameter or the staged file.
++# v16 (change 2): these helpers describe what is CONFIGURED / LIVE — they do not
++# imply the workaround is required. "active" = live parameter set OR staged in
++# the config (v15.3 semantics, kept for the JSON key of the same name); "live" =
++# the running module actually has disable_aspm set. While it is live, PCIe L1.x
++# is blocked on the Wi-Fi link (on this machine that kept PC6/PC8/S0i3 at 0
++# before kernel 7.2.6).
++aspm_workaround_live() {
++  case "$(mt7921e_disable_aspm_live)" in
++    Y|y|1) return 0 ;;
++  esac
++  return 1
++}
++
+ aspm_workaround_active() {
+   local live
+   live="$(mt7921e_disable_aspm_live)"
+@@ -537,6 +587,28 @@
+   mt7921e_conf_has_disable_aspm
+ }
+ 
++# v16 (change 1): read-only, heuristic count of mt7921e error lines in THIS
++# boot's kernel log. Prints an integer, or "unknown" when no kernel log is
++# readable (kernel.dmesg_restrict=1 without root and no journal access). It is
++# only ever used to print a WARN; it never fails --safe-mode-check.
++mt7921e_error_count() {
++  local out=""
++  if command -v journalctl >/dev/null 2>&1; then
++    out="$(journalctl -k -b --no-pager -q 2>/dev/null || true)"
++  fi
++  if [[ -z "$out" ]] && command -v dmesg >/dev/null 2>&1; then
++    out="$(dmesg 2>/dev/null || true)"
++  fi
++  if [[ -z "$out" ]]; then
++    printf '%s\n' unknown
++    return 0
++  fi
++  printf '%s\n' "$out" |
++    { grep -iE 'mt7921e.*(timeout|timed out|failed|error|crash|assert)' || true; } |
++    wc -l | tr -d '[:space:]'
++  printf '\n'
++}
++
+ # ---- Intel RAPL constraint enumeration and lock probing (I-01, I-19, I-20) --
+ # Prints "zone<TAB>canonical-constraint-file<TAB>PL1|PL2" once per constraint.
+ # Shared by the dashboard and --status-json so the two can never disagree.
+@@ -565,6 +637,9 @@
+ # is semantically a no-op but is enough to distinguish a writable register from
+ # a BIOS/MSR-locked one. Prints writable|locked|unknown|absent. Non-root cannot
+ # write at all, so the state is reported unknown rather than guessed.
++# v16 (change 4): this IS a sysfs write, so it is called ONLY from the mutating
++# --pl1/--pl2 path (step 20, real runs). --status and --status-json never call
++# it; they report the lock state as "unknown (read-only)" / null.
+ rapl_probe_lock_state() {
+   local node="$1" cur=""
+   if [[ ! -e "$node" ]]; then
+@@ -634,9 +709,12 @@
+ 
+ # Prints signed-by-vivobook-key | signed-by-other | unsigned | file-missing |
+ # sbverify-missing. Read-only; never aborts on missing tools or files.
+-running_kernel_signature_state() {
+-  local k out
+-  k="/boot/vmlinuz-$(uname -r)"
++# v16 (change 8): path-parameterised so the NEWEST installed image (the one
++# GRUB boots by default after a kernel update) can be checked too.
++# Prints file-missing | sbverify-missing | unsigned | signed-by-vivobook-key |
++# signed-by-other.
++kernel_image_signature_state() {
++  local k="$1" out
+   if [[ ! -f "$k" ]]; then
+     printf '%s\n' file-missing
+     return 0
+@@ -656,20 +734,56 @@
+   fi
+ }
+ 
++# Kept as a wrapper so existing callers and the JSON key are unchanged.
++running_kernel_signature_state() {
++  kernel_image_signature_state "/boot/vmlinuz-$(uname -r)"
++}
++
++# Newest /boot/vmlinuz-* by version sort (sort -V), ignoring backup copies.
++# Prints the path, or nothing when no image is found.
++newest_installed_kernel_image() {
++  local f
++  for f in /boot/vmlinuz-*; do
++    [[ -f "$f" ]] || continue
++    case "$f" in
++      *.old|*.bak|*.orig|*.unsigned|*.dpkg-*) continue ;;
++    esac
++    printf '%s\n' "$f"
++  done | sort -V | tail -n 1
++}
++
+ # Prints "name<TAB>charge_full<TAB>charge_full_design<TAB>cycle_count<TAB>health%".
++# v16 (change 11): 6 columns — name, full, full_design, cycles, health, unit.
++# Batteries report either charge_* (uAh) or energy_* (uWh); the reference
++# X1605VA reports uWh. The pair is taken together (never one charge_ and one
++# energy_ value) and the unit column says which: uAh | uWh | unavailable.
++# Every column is non-empty (IFS=$'\t' read collapses empty fields).
+ battery_health_rows() {
+-  local d name cf cfd cyc health
++  local d name cf cfd cyc health unit ef efd
+   for d in /sys/class/power_supply/BAT*; do
+     [[ -d "$d" ]] || continue
+     name="$(basename "$d")"
+     cf="$(status_value "$d/charge_full")"
+     cfd="$(status_value "$d/charge_full_design")"
++    unit=unavailable
++    if [[ "$cf" =~ ^[0-9]+$ && "$cfd" =~ ^[0-9]+$ ]]; then
++      unit=uAh
++    else
++      ef="$(status_value "$d/energy_full")"
++      efd="$(status_value "$d/energy_full_design")"
++      if [[ "$ef" =~ ^[0-9]+$ && "$efd" =~ ^[0-9]+$ ]]; then
++        cf="$ef"
++        cfd="$efd"
++        unit=uWh
++      fi
++    fi
+     cyc="$(status_value "$d/cycle_count")"
+     health="unavailable"
+-    if [[ "$cf" =~ ^[0-9]+$ && "$cfd" =~ ^[0-9]+$ ]] && (( 10#$cfd > 0 )); then
++    if [[ "$unit" != unavailable ]] && (( 10#$cfd > 0 )); then
+       health="$(awk "BEGIN {printf \"%.1f\", 100 * $cf / $cfd}" 2>/dev/null || printf '%s' unavailable)"
+     fi
+-    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$cf" "$cfd" "$cyc" "$health"
++    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "${name:-unknown}" "${cf:-unavailable}" "${cfd:-unavailable}" \
++      "${cyc:-unavailable}" "${health:-unavailable}" "$unit"
+   done
+ }
+ 
+@@ -728,6 +842,495 @@
+ # Always returns 0: a missing or unmanaged file is not an error.
+ I915_CONF_REMOVED=false
+ 
++# ---- v16 (change 5): ownership-aware restore helpers -------------------------
++# --restore-defaults removes a path only when this script owns it: the
++# "Managed by vivobook_optimize" marker (written into every unit, helper, hook,
++# /etc/default file and udev rule since v15.3, I-18), or — where an explicit
++# second argument is given — the same normalized legacy content rule that the
++# write path already uses (managed_or_legacy_adoptable). Anything else is
++# preserved and listed at the end. v15.3 removed these paths unconditionally.
++RESTORE_SKIPPED=()
++RESTORE_FAILED=()
++
++# restore_remove_owned <path> [legacy_norm]
++# Returns 0 when the path is gone afterwards (absent, removed, or would be
++# removed in dry-run), 1 when it was preserved or the removal failed.
++restore_remove_owned() {
++  local f="$1" legacy_norm="${2:-}" owned=false norm=""
++  [[ -e "$f" || -L "$f" ]] || return 0
++  if is_managed_file "$f"; then
++    owned=true
++  elif [[ -n "$legacy_norm" && -f "$f" ]]; then
++    norm="$(command sed -e 's/#.*$//' -e 's/[[:space:]]//g' "$f" 2>/dev/null | tr -d '\n' || true)"
++    [[ "$norm" == "$legacy_norm" ]] && owned=true
++  fi
++  if [[ "$owned" != true ]]; then
++    echo "   SKIPPED (not script-managed, preserved): $f"
++    RESTORE_SKIPPED+=("$f")
++    return 1
++  fi
++  if [[ "$DRY_RUN" == true ]]; then
++    echo "[DRY-RUN] Would remove (script-managed): $f"
++    return 0
++  fi
++  command rm -f "$f" 2>/dev/null || true
++  if [[ -e "$f" || -L "$f" ]]; then
++    echo "   WARNING: could not remove $f" >&2
++    RESTORE_FAILED+=("$f")
++    return 1
++  fi
++  return 0
++}
++
++# restore_unit_owned <unit>: disable+stop and remove a unit ONLY when its file
++# under /etc/systemd/system is script-managed. An unmarked unit of the same
++# name (admin-written, or from another tool) is neither stopped nor removed.
++restore_unit_owned() {
++  local unit="$1" upath="/etc/systemd/system/$1"
++  [[ -e "$upath" || -L "$upath" ]] || return 0
++  if ! is_managed_file "$upath"; then
++    echo "   SKIPPED (not script-managed, preserved; not disabled): $upath"
++    RESTORE_SKIPPED+=("$upath")
++    return 1
++  fi
++  if [[ "$DRY_RUN" == true ]]; then
++    echo "[DRY-RUN] Would disable --now $unit"
++  else
++    systemctl disable --now "$unit" >/dev/null 2>&1 || true
++  fi
++  restore_remove_owned "$upath"
++}
++
++# PPD state file written by step 15c. Marked since v15.3; earlier versions wrote
++# the same four PPD_WAS_* assignments without a marker (the file is created only
++# once, so an old copy can survive upgrades). Such a file is recognised by its
++# content. It is parsed, never sourced.
++ppd_state_file_owned() {
++  local f="$1" line
++  [[ -f "$f" ]] || return 1
++  is_managed_file "$f" && return 0
++  while IFS= read -r line || [[ -n "$line" ]]; do
++    line="${line%%#*}"
++    line="${line//[[:space:]]/}"
++    [[ -z "$line" ]] && continue
++    [[ "$line" =~ ^PPD_WAS_(PRESENT|ACTIVE|ENABLED|MASKED)=\"?(true|false)\"?$ ]] || return 1
++  done < "$f"
++  return 0
++}
++ppd_state_value() {
++  local f="$1" key="$2" line v=false
++  while IFS= read -r line || [[ -n "$line" ]]; do
++    line="${line%%#*}"
++    line="${line//[[:space:]]/}"
++    line="${line//\"/}"
++    [[ "$line" == "$key="* ]] && v="${line#*=}"
++  done < "$f"
++  [[ "$v" == true ]] || v=false
++  printf '%s\n' "$v"
++}
++
++# ---- v16 (change 6): HD-audio power-save helpers (read-only) ----------------
++AUDIO_CONF=/etc/modprobe.d/audio-powersave.conf
++AUDIO_PARAM_DIR=/sys/module/snd_hda_intel/parameters
++
++# Content step 12 (legacy HDA path) has ever written, after the same
++# comment/whitespace normalisation managed_or_legacy_adoptable (I-17) uses.
++# A marked file with any other options was hand-edited (or comes from an older
++# release) and is preserved on the SOF path.
++audio_conf_is_legacy_content() {
++  local norm
++  norm="$(command sed -e 's/#.*$//' -e 's/[[:space:]]//g' "$1" 2>/dev/null | tr -d '\n' || true)"
++  [[ "$norm" == "optionssnd_hda_intelpower_save=1power_save_controller=Y" ]]
++}
++
++# Live snd_hda_intel parameter, or "unavailable" when not exposed/readable.
++audio_hda_param() {
++  local v=""
++  v="$(cat "$AUDIO_PARAM_DIR/$1" 2>/dev/null || true)"
++  v="${v//[[:space:]]/}"
++  printf '%s\n' "${v:-unavailable}"
++}
++
++# Intel SOF PCI driver loaded? /proc/modules works without lsmod.
++audio_sof_loaded() {
++  grep -q '^snd_sof_pci_intel' /proc/modules 2>/dev/null
++}
++
++# All option tokens of 'options snd_hda_intel ...' lines in the staged file
++# (parsed, never sourced). Empty when absent or no such line.
++audio_staged_options() {
++  [[ -f "$AUDIO_CONF" ]] || return 0
++  command sed -n -e 's/#.*$//' \
++    -e 's/^[[:space:]]*options[[:space:]]\{1,\}snd_hda_intel[[:space:]]\{1,\}//p' \
++    "$AUDIO_CONF" 2>/dev/null | tr -s '[:space:]' ' ' | command sed -e 's/^ //' -e 's/ $//'
++}
++
++# Value of one staged option (last occurrence wins, as with modprobe), or "".
++audio_staged_opt() {
++  local key="$1" tok v=""
++  for tok in $(audio_staged_options); do
++    [[ "$tok" == "$key="* ]] && v="${tok#*=}"
++  done
++  printf '%s\n' "$v"
++}
++
++# Normalise booleans for comparison (Y/y/1 -> Y, N/n/0 -> N).
++audio_norm_bool() {
++  case "$1" in
++    Y|y|1) printf '%s\n' Y ;;
++    N|n|0) printf '%s\n' N ;;
++    *)     printf '%s\n' "$1" ;;
++  esac
++}
++
++# no-staged-file | no-hda-options | live-unavailable | match | staged-differs-from-live
++audio_staged_verdict() {
++  local s_ps s_psc l_ps l_psc differs=false
++  [[ -f "$AUDIO_CONF" ]] || { printf '%s\n' no-staged-file; return 0; }
++  [[ -n "$(audio_staged_options)" ]] || { printf '%s\n' no-hda-options; return 0; }
++  l_ps="$(audio_hda_param power_save)"
++  l_psc="$(audio_hda_param power_save_controller)"
++  if [[ "$l_ps" == unavailable && "$l_psc" == unavailable ]]; then
++    printf '%s\n' live-unavailable
++    return 0
++  fi
++  s_ps="$(audio_staged_opt power_save)"
++  s_psc="$(audio_staged_opt power_save_controller)"
++  if [[ -n "$s_ps" && "$l_ps" != unavailable && "$s_ps" != "$l_ps" ]]; then
++    differs=true
++  fi
++  if [[ -n "$s_psc" && "$l_psc" != unavailable &&
++        "$(audio_norm_bool "$s_psc")" != "$(audio_norm_bool "$l_psc")" ]]; then
++    differs=true
++  fi
++  if [[ "$differs" == true ]]; then
++    printf '%s\n' staged-differs-from-live
++  else
++    printf '%s\n' match
++  fi
++}
++
++# ---- v16 (change 7): resume (system-sleep) hooks ----------------------------
++SLEEP_HOOK_DIR=/usr/lib/systemd/system-sleep
++# hook-name:unit pairs for the four script-written resume hooks.
++SLEEP_HOOK_PAIRS=(
++  vivobook-battery:battery-charge-threshold.service
++  vivobook-thermal-profile:asus-thermal-profile.service
++  vivobook-intel-epp:intel-epp-profile.service
++  vivobook-kbd-timeout:vivobook-kbd-timeout.service
++)
++
++# The one hook body all four hooks share. v15.3 restarted the unit on every
++# resume, so a deliberately DISABLED static-profile unit (thermal/EPP on the
++# reference machine) was started again after each suspend and overrode the
++# dynamic power-switch values. The restart is now guarded by is-enabled.
++# Written with a here-string (atomic_write <<< "$(sleep_hook_body ...)"), never
++# a pipe, so TMP_REGISTRY survives (I-24).
++sleep_hook_body() {
++  local unit="$1"
++  cat << HOOK
++#!/usr/bin/env bash
++# Managed by vivobook_optimize.sh v16
++# Re-applies $unit after resume, but only while that unit is enabled:
++# a deliberately disabled unit is never started behind the admin's back.
++if [[ "\${1:-}" == post ]] && systemctl is-enabled --quiet $unit 2>/dev/null; then
++  systemctl restart $unit >/dev/null 2>&1 || true
++fi
++HOOK
++}
++
++# enabled | installed-disabled | not-installed   (masked counts as installed-disabled)
++unit_install_state() {
++  local u="$1" f
++  for f in "/etc/systemd/system/$u" "/usr/lib/systemd/system/$u" "/lib/systemd/system/$u"; do
++    if [[ -e "$f" || -L "$f" ]]; then
++      if systemctl is-enabled --quiet "$u" 2>/dev/null; then
++        printf '%s\n' enabled
++      else
++        printf '%s\n' installed-disabled
++      fi
++      return 0
++    fi
++  done
++  printf '%s\n' not-installed
++}
++
++# absent | unmanaged | guarded | unguarded
++sleep_hook_guard_state() {
++  local hook="$1"
++  [[ -e "$hook" ]] || { printf '%s\n' absent; return 0; }
++  is_managed_file "$hook" || { printf '%s\n' unmanaged; return 0; }
++  if grep -q 'is-enabled' "$hook" 2>/dev/null; then
++    printf '%s\n' guarded
++  else
++    printf '%s\n' unguarded
++  fi
++}
++
++# Dashboard line for a static-profile unit plus its resume hook.
++persistent_service_line() {
++  local unit="$1" hook="$SLEEP_HOOK_DIR/$2" st hs
++  st="$(unit_install_state "$unit")"
++  hs="$(sleep_hook_guard_state "$hook")"
++  echo "  Persistent service: $st"
++  if [[ "$hs" == unguarded ]]; then
++    if [[ "$st" == enabled ]]; then
++      echo "  Resume hook:        UNGUARDED v15.3 form (the next default run refreshes it, step 15d)"
++    else
++      echo "  Resume hook:        UNGUARDED: restarts this unit on resume even though it is not"
++      echo "                      enabled — the next default run refreshes it (step 15d)"
++    fi
++  elif [[ "$hs" != absent ]]; then
++    echo "  Resume hook:        $hs"
++  fi
++}
++
++# ---- v16 (change 10): pmc_core residency readers (read-only, debugfs) -------
++# Formats verified against upstream drivers/platform/x86/intel/pmc/core.c:
++#   package_cstate_show:   "Package C6 : <n>"  (MSR count * 1000 / tsc_khz -> usec)
++#   substate_residencies:  header line(s) containing "Substate" and "Residency"
++#                          (newer kernels prefix "pmcN"), then "<S0iX.Y> <n>"
++#                          rows (30.5 usec hardware step, reported in usec).
++# On Raptor Lake-P (this CPU) the driver uses the TGL register map, which
++# creates substate_residencies. Every value is cumulative since boot (hardware
++# counters), not per suspend. Nothing here infers S0i3 from SLP_S0.
++PMC_CORE_DIR=/sys/kernel/debug/pmc_core
++
++# Exact "Package C<N>" value from package_cstate_show, or "" (C1 never matches C10).
++pmc_pkg_cstate() {
++  local want="Package C$1"
++  [[ -r "$PMC_CORE_DIR/package_cstate_show" ]] || return 0
++  awk -F: -v k="$want" '{
++    name = $1; gsub(/^[ \t]+|[ \t]+$/, "", name)
++    if (name == k) { v = $2; gsub(/[ \t]+/, "", v); print v; exit }
++  }' "$PMC_CORE_DIR/package_cstate_show" 2>/dev/null || true
++}
++
++# "<pcN>\t<value>" for every numeric "Package C<N> : <value>" row.
++pmc_pkg_cstate_rows() {
++  [[ -r "$PMC_CORE_DIR/package_cstate_show" ]] || return 0
++  awk -F: '{
++    name = $1; gsub(/^[ \t]+|[ \t]+$/, "", name)
++    v = $2; gsub(/[ \t]+/, "", v)
++    if (name ~ /^Package C[0-9]+$/ && v ~ /^[0-9]+$/) {
++      sub(/^Package C/, "pc", name); print name "\t" v
++    }
++  }' "$PMC_CORE_DIR/package_cstate_show" 2>/dev/null || true
++}
++
++# "<S0iX.Y>\t<usec>" rows from substate_residencies — ONLY when the whole file
++# validates against the upstream format (first PMC block only). Returns 1 and
++# prints nothing when the file is absent, unreadable or unrecognised.
++pmc_substate_rows() {
++  local f="$PMC_CORE_DIR/substate_residencies" line out="" headers=0 rows=0
++  [[ -r "$f" ]] || return 1
++  while IFS= read -r line || [[ -n "$line" ]]; do
++    [[ "$line" =~ ^[[:space:]]*$ ]] && continue
++    if [[ "$line" == *Substate* && "$line" == *Residency* ]]; then
++      headers=$((headers + 1))
++      (( headers > 1 )) && break
++      continue
++    fi
++    if [[ "$line" =~ ^[[:space:]]*(S0i[0-9]+\.[0-9]+)[[:space:]]+([0-9]+)[[:space:]]*$ ]]; then
++      (( headers == 1 )) || return 1
++      out+="${BASH_REMATCH[1]}"$'\t'"${BASH_REMATCH[2]}"$'\n'
++      rows=$((rows + 1))
++    else
++      return 1
++    fi
++  done < "$f"
++  (( headers >= 1 && rows >= 1 )) || return 1
++  printf '%s' "$out"
++}
++
++# Sum of all S0i<major>.* rows, e.g. pmc_substate_sum 3 -> total S0i3 usec.
++pmc_substate_sum() {
++  local major="$1" rows
++  rows="$(pmc_substate_rows)" || return 1
++  printf '%s\n' "$rows" | awk -F'\t' -v m="S0i$major." 'index($1, m) == 1 { s += $2; n++ }
++    END { if (n) print s; else print "" }'
++}
++
++# ---- v16 (change 12): unmanaged sysctl overrides (report only) --------------
++# Keys this script manages: step 11 (99-vivobook.conf) and step 11b
++# (98-network-bbr.conf). Any UNMARKED sysctl file that also sets one of them is
++# reported in status, JSON and --restore-defaults output — never edited. The
++# reference machine has /etc/sysctl.d/99-bbr.conf, which re-applies BBR after
++# --restore-defaults resets tcp_congestion_control to cubic.
++SYSCTL_MANAGED_KEYS=(
++  vm.swappiness fs.inotify.max_user_watches kernel.nmi_watchdog
++  vm.dirty_writeback_centisecs net.core.default_qdisc net.ipv4.tcp_congestion_control
++)
++# Highest priority first: a basename in an earlier directory shadows the same
++# basename in later ones (systemd-sysctl / procps 'sysctl --system' rules).
++SYSCTL_SCAN_DIRS=(/etc/sysctl.d /run/sysctl.d /usr/local/lib/sysctl.d /usr/lib/sysctl.d /lib/sysctl.d)
++SYSCTL_CONF_FILE=/etc/sysctl.conf
++
++sysctl_managed_file_for_key() {
++  case "$1" in
++    net.core.default_qdisc|net.ipv4.tcp_congestion_control) printf '%s\n' /etc/sysctl.d/98-network-bbr.conf ;;
++    *) printf '%s\n' /etc/sysctl.d/99-vivobook.conf ;;
++  esac
++}
++
++# Effective sysctl files in application order (basename shadowing applied,
++# /dev/null masks honoured, symlinked duplicates removed by realpath),
++# followed by /etc/sysctl.conf, which 'sysctl --system' reads last.
++sysctl_effective_files() {
++  local LC_ALL=C d f b r
++  local -A seen_base=() seen_real=()
++  local -a rows=()
++  for d in "${SYSCTL_SCAN_DIRS[@]}"; do
++    [[ -d "$d" ]] || continue
++    for f in "$d"/*.conf; do
++      [[ -e "$f" || -L "$f" ]] || continue
++      b="${f##*/}"
++      [[ -n "${seen_base[$b]:-}" ]] && continue
++      seen_base[$b]=1
++      rows+=("$b"$'\t'"$f")
++    done
++  done
++  if (( ${#rows[@]} > 0 )); then
++    while IFS=$'\t' read -r b f; do
++      [[ -n "$f" ]] || continue
++      r="$(readlink -f "$f" 2>/dev/null || printf '%s' "$f")"
++      [[ "$r" == /dev/null ]] && continue
++      [[ -f "$r" ]] || continue
++      [[ -n "${seen_real[$r]:-}" ]] && continue
++      seen_real[$r]=1
++      printf '%s\n' "$f"
++    done < <(printf '%s\n' "${rows[@]}" | sort -t $'\t' -k1,1)
++  fi
++  if [[ -f "$SYSCTL_CONF_FILE" ]]; then
++    r="$(readlink -f "$SYSCTL_CONF_FILE" 2>/dev/null || printf '%s' "$SYSCTL_CONF_FILE")"
++    [[ -n "${seen_real[$r]:-}" ]] || printf '%s\n' "$SYSCTL_CONF_FILE"
++  fi
++}
++
++# Rows "<file>\t<key>\t<value>\t<applies>\t<managed_file>" for unmanaged files
++# that set a managed key. <applies>: after (wins over the managed file),
++# before (the managed file wins), no-managed-file (sole source).
++sysctl_unmanaged_overrides() {
++  local LC_ALL=C f src b line key val mk mf mb applies
++  while IFS= read -r f; do
++    [[ -n "$f" ]] || continue
++    is_managed_file "$f" && continue
++    b="${f##*/}"
++    src="$f"
++    while IFS= read -r line || [[ -n "$line" ]]; do
++      line="${line%%#*}"
++      line="${line%%;*}"
++      [[ "$line" == *=* ]] || continue
++      key="${line%%=*}"
++      val="${line#*=}"
++      key="${key//[[:space:]]/}"
++      key="${key#-}"
++      key="${key//\//.}"
++      val="$(printf '%s' "$val" | command sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
++      for mk in "${SYSCTL_MANAGED_KEYS[@]}"; do
++        [[ "$key" == "$mk" ]] || continue
++        mf="$(sysctl_managed_file_for_key "$key")"
++        mb="${mf##*/}"
++        if ! is_managed_file "$mf"; then
++          applies=no-managed-file
++        elif [[ "$f" == "$SYSCTL_CONF_FILE" || "$b" > "$mb" ]]; then
++          applies=after
++        else
++          applies=before
++        fi
++        printf '%s\t%s\t%s\t%s\t%s\n' "$f" "$key" "${val:-(empty)}" "$applies" "$mf"
++      done
++    done < "$src"
++  done < <(sysctl_effective_files)
++}
++
++# ---- v16 (change 13): --battery-limit=off live reset, counted ---------------
++# v15.3 printed "Charge threshold reset to 100%" even when no attribute existed
++# or every write failed. Count what actually happened instead.
++battery_limit_off_reset() {
++  local b cur total=0 set_ok=0 already=0 failed=0
++  for b in /sys/class/power_supply/BAT*/charge_control_end_threshold; do
++    [[ -e "$b" ]] || continue
++    total=$((total + 1))
++    cur="$(cat "$b" 2>/dev/null || true)"
++    cur="${cur//[[:space:]]/}"
++    if [[ "$cur" == 100 ]]; then
++      already=$((already + 1))
++      continue
++    fi
++    if [[ ! -w "$b" ]]; then
++      failed=$((failed + 1))
++      continue
++    fi
++    if [[ "$DRY_RUN" == true ]]; then
++      echo "[DRY-RUN] Restore $b to 100 (currently ${cur:-unknown})"
++      set_ok=$((set_ok + 1))
++    elif { printf '%s\n' 100 > "$b"; } 2>/dev/null; then
++      set_ok=$((set_ok + 1))
++    else
++      failed=$((failed + 1))
++    fi
++  done
++  if (( total == 0 )); then
++    echo "   No charge_control_end_threshold attribute found; nothing to reset."
++    return 0
++  fi
++  if (( set_ok > 0 )); then
++    if [[ "$DRY_RUN" == true ]]; then
++      echo "   Charge threshold would be set to 100% on $set_ok of $total battery attribute(s)."
++    else
++      echo "   Charge threshold set to 100% on $set_ok of $total battery attribute(s) for this session."
++    fi
++  fi
++  if (( already > 0 )); then
++    if (( already == total )); then
++      echo "   Charge threshold already 100% on all $total battery attribute(s); nothing to change."
++    else
++      echo "   Charge threshold already 100% on $already of $total battery attribute(s)."
++    fi
++  fi
++  if (( failed > 0 )); then
++    echo "WARNING: could not reset the charge threshold to 100% on $failed of $total battery attribute(s)." >&2
++    return 1
++  fi
++  return 0
++}
++
++# ---- v16 (change 15): USB exempt-class diagnostic (read-only) ---------------
++# The --with-usb-autosuspend rule sets power/control=on for devices with an
++# interface of class 03 (HID), e0 (wireless/BT), 01 (audio) or 0e (video).
++# On the reference machine the webcam (1-9) and Bluetooth (1-10) still read
++# "auto". This only REPORTS; the rule itself is unchanged.
++USB_EXEMPT_CLASSES="03 e0 01 0e"
++
++# Rows "<device>\t<classes>\t<power/control>\t<product>" (non-empty fields).
++usb_exempt_class_rows() {
++  local intf cls dev name
++  local -A dev_classes=()
++  for intf in /sys/bus/usb/devices/*:*; do
++    [[ -r "$intf/bInterfaceClass" ]] || continue
++    cls="$(cat "$intf/bInterfaceClass" 2>/dev/null || true)"
++    cls="${cls,,}"
++    case " $USB_EXEMPT_CLASSES " in
++      *" $cls "*) ;;
++      *) continue ;;
++    esac
++    name="${intf##*/}"
++    dev="${name%%:*}"
++    case ",${dev_classes[$dev]:-}," in
++      *",$cls,"*) ;;
++      *) dev_classes[$dev]="${dev_classes[$dev]:+${dev_classes[$dev]},}$cls" ;;
++    esac
++  done
++  (( ${#dev_classes[@]} > 0 )) || return 0
++  for dev in $(printf '%s\n' "${!dev_classes[@]}" | sort -V); do
++    local ctl prod
++    ctl="$(cat "/sys/bus/usb/devices/$dev/power/control" 2>/dev/null || true)"
++    prod="$(cat "/sys/bus/usb/devices/$dev/product" 2>/dev/null || true)"
++    printf '%s\t%s\t%s\t%s\n' "$dev" "${dev_classes[$dev]}" "${ctl:-unknown}" "${prod:-unknown}"
++  done
++}
++
+ remove_i915_conf() {
+   [[ -e "$I915_CONF" ]] || return 0
+   if grep -q "Managed by vivobook_optimize" "$I915_CONF" 2>/dev/null ||
+@@ -936,7 +1539,7 @@
+       fi
+     done
+ 
+-    local content="# Managed by vivobook_optimize.sh v15.3 --with-browser-wayland"$'\n'
++    local content="# Managed by vivobook_optimize.sh v16 --with-browser-wayland"$'\n'
+     for nl in "${new_lines[@]}"; do
+       content+="$nl"$'\n'
+     done
+@@ -1044,7 +1647,11 @@
+ }
+ 
+ restore_defaults() {
+-  echo "== Restoring ASUS Vivobook v15.3 managed defaults =="
++  echo "== Restoring ASUS Vivobook v16 managed defaults =="
++  RESTORE_SKIPPED=()
++  RESTORE_FAILED=()
++  # v16 (change 5): ownership-aware. Each unit is disabled/stopped and removed
++  # only when /etc/systemd/system/<unit> carries the script marker.
+   local unit
+   for unit in \
+     powertop-autotune.service \
+@@ -1057,10 +1664,21 @@
+     system-maintenance.service \
+     system-maintenance.timer
+   do
+-    systemctl disable --now "$unit" >/dev/null 2>&1 || true
+-    rm -f "/etc/systemd/system/$unit"
++    restore_unit_owned "$unit" || true
+   done
+-  systemctl disable --now zramswap.service >/dev/null 2>&1 || true
++  # zram ownership is captured BEFORE the configs are removed below: the legacy
++  # zramswap.service and the live /dev/zram0 detach are only touched when one of
++  # the zram configs was script-managed.
++  local ZRAM_TOOLS_WAS_MANAGED=false ZRAM_GEN_WAS_MANAGED=false
++  is_managed_file /etc/default/zramswap && ZRAM_TOOLS_WAS_MANAGED=true
++  is_managed_file /etc/systemd/zram-generator.conf && ZRAM_GEN_WAS_MANAGED=true
++  if [[ "$ZRAM_TOOLS_WAS_MANAGED" == true ]]; then
++    if [[ "$DRY_RUN" == true ]]; then
++      echo "[DRY-RUN] Would disable --now zramswap.service (script-managed /etc/default/zramswap)"
++    else
++      systemctl disable --now zramswap.service >/dev/null 2>&1 || true
++    fi
++  fi
+ 
+   # Transient runtime lock files created by the v13/v15.1 helpers. Safe to
+   # remove while helpers are stopped; /run is tmpfs anyway. The main
+@@ -1069,31 +1687,39 @@
+   rm -f /run/vivobook-power-switch.lock
+   rm -f /run/system-maintenance.lock
+ 
+-  rm -f /usr/local/bin/system-maintenance.sh
+-  rm -f /usr/local/bin/set-battery-threshold.sh
+-  rm -f /usr/local/bin/set-asus-thermal-profile.sh
+-  rm -f /usr/local/bin/set-intel-epp.sh
+-  rm -f /usr/local/bin/vivobook-power-switch.sh
+-  rm -f /usr/local/bin/set-rapl-limits.sh
+-  rm -f /usr/local/bin/vivobook-kbd-timeout.sh
+-  rm -f /usr/lib/systemd/system-sleep/vivobook-battery
+-  rm -f /usr/lib/systemd/system-sleep/vivobook-thermal-profile
+-  rm -f /usr/lib/systemd/system-sleep/vivobook-intel-epp
+-  rm -f /usr/lib/systemd/system-sleep/vivobook-kbd-timeout
+-
+-  rm -f /etc/default/vivobook-battery
+-  rm -f /etc/default/vivobook-thermal-profile
+-  rm -f /etc/default/vivobook-epp
+-  rm -f /etc/default/vivobook-rapl
+-  remove_managed_config /etc/default/zramswap
+-  remove_managed_config /etc/systemd/zram-generator.conf
++  # v16 (change 5): helpers, sleep hooks and /etc/default state files are
++  # removed only when script-managed; unmarked copies are preserved and listed.
++  local owned_path
++  for owned_path in \
++    /usr/local/bin/system-maintenance.sh \
++    /usr/local/bin/set-battery-threshold.sh \
++    /usr/local/bin/set-asus-thermal-profile.sh \
++    /usr/local/bin/set-intel-epp.sh \
++    /usr/local/bin/vivobook-power-switch.sh \
++    /usr/local/bin/set-rapl-limits.sh \
++    /usr/local/bin/vivobook-kbd-timeout.sh \
++    /usr/lib/systemd/system-sleep/vivobook-battery \
++    /usr/lib/systemd/system-sleep/vivobook-thermal-profile \
++    /usr/lib/systemd/system-sleep/vivobook-intel-epp \
++    /usr/lib/systemd/system-sleep/vivobook-kbd-timeout \
++    /etc/default/vivobook-battery \
++    /etc/default/vivobook-thermal-profile \
++    /etc/default/vivobook-epp \
++    /etc/default/vivobook-rapl \
++    /etc/default/zramswap \
++    /etc/systemd/zram-generator.conf
++  do
++    restore_remove_owned "$owned_path" || true
++  done
+ 
+   # v15.3 (I-07): removing the generator config does not detach an already
+   # live /dev/zram0 swap device, and step 16 already knows this matters. Do it
+   # here too, so 'swapon --show' does not keep listing a stale zram device
+   # after a restore. The detach is guarded and reports failure instead of
+-  # swallowing it.
+-  if [[ -e /dev/zram0 ]] || systemctl is-active --quiet systemd-zram-setup@zram0.service 2>/dev/null; then
++  # swallowing it. v16 (change 5): only when a script-managed zram config was
++  # present — a zram device configured by the admin is left alone.
++  if [[ "$ZRAM_TOOLS_WAS_MANAGED" == true || "$ZRAM_GEN_WAS_MANAGED" == true ]] &&
++     { [[ -e /dev/zram0 ]] || systemctl is-active --quiet systemd-zram-setup@zram0.service 2>/dev/null; }; then
+     systemctl stop systemd-zram-setup@zram0.service >/dev/null 2>&1 || true
+     if [[ -e /dev/zram0 ]]; then
+       if ! swapoff /dev/zram0 2>/dev/null; then
+@@ -1106,27 +1732,38 @@
+   # v15.3 (I-08): remember whether this script installed the BBR sysctl.
+   # Removing a sysctl.d file does not reset the live value, and the BBR
+   # default_qdisc/tcp_congestion_control pair is exactly that case.
++  # v16 (change 5): the BBR pair also honours the v15.3 legacy-adoption rule
++  # (managed_or_legacy_adoptable): an unmarked file with exactly the content
++  # older releases wrote counts as script-owned, as it does on the write path.
++  local BBR_SYSCTL_LEGACY="net.core.default_qdisc=fqnet.ipv4.tcp_congestion_control=bbr"
+   BBR_CONF_WAS_MANAGED=false
+-  if is_managed_file /etc/sysctl.d/98-network-bbr.conf; then
++  if [[ -e /etc/sysctl.d/98-network-bbr.conf ]] &&
++     managed_or_legacy_adoptable /etc/sysctl.d/98-network-bbr.conf "$BBR_SYSCTL_LEGACY"; then
+     BBR_CONF_WAS_MANAGED=true
+   fi
+ 
+-  remove_managed_config /etc/sysctl.d/99-vivobook.conf
+-  remove_managed_config /etc/sysctl.d/98-network-bbr.conf
+-  remove_managed_config /etc/modules-load.d/bbr.conf
+-  remove_managed_config /etc/modprobe.d/audio-powersave.conf
+-
+-  # v15.3 (I-03): the MediaTek MT7902 needs 'options mt7921e disable_aspm=1'
+-  # for link stability on this platform. Removing it is the documented
+-  # rollback, but it re-exposes Wi-Fi to the disconnects/packet loss the
+-  # workaround exists to prevent — so say so loudly.
++  restore_remove_owned /etc/sysctl.d/99-vivobook.conf || true
++  restore_remove_owned /etc/sysctl.d/98-network-bbr.conf "$BBR_SYSCTL_LEGACY" || true
++  restore_remove_owned /etc/modules-load.d/bbr.conf "tcp_bbr" || true
++  # v16 (change 6): a marked audio file with hand-edited options is still
++  # removed here (restore reverses every managed file), but say so first.
++  if is_managed_file "$AUDIO_CONF" && ! audio_conf_is_legacy_content "$AUDIO_CONF"; then
++    echo "   NOTE: $AUDIO_CONF is script-marked but carries edited options"
++    echo "   NOTE: ($(audio_staged_options)); it is removed as managed. Copy it first if you"
++    echo "   NOTE: want to keep it (e.g. to /root/vivobook-backups/modprobe/)."
++  fi
++  restore_remove_owned /etc/modprobe.d/audio-powersave.conf || true
++
++  # v16 (change 2): the disable_aspm=1 workaround is an OPTIONAL fallback. On
++  # the reference machine (kernel 7.2.6) Wi-Fi is stable without it and it was
++  # what blocked PC6/PC8/S0i3. Say what removing it does, not that it is required.
+   if is_managed_file "$MT7921E_CONF"; then
+-    echo "   WARNING: removing $MT7921E_CONF (mt7921e disable_aspm=1)." >&2
+-    echo "   WARNING: Wi-Fi link stability on the MT7902 REQUIRES this workaround on this" >&2
+-    echo "   WARNING: platform. Expect disconnects and packet loss until it is restored with" >&2
+-    echo "   WARNING:   sudo bash $SCRIPT_PATH --with-mt7921e-aspm" >&2
++    echo "   NOTE: removing the script-managed $MT7921E_CONF (mt7921e disable_aspm=1)."
++    echo "   NOTE: Wi-Fi ASPM returns to the driver default at the next module load/reboot."
++    echo "   NOTE: Re-stage it only if the Wi-Fi link becomes unstable on your kernel:"
++    echo "   NOTE:   sudo bash $SCRIPT_PATH --with-mt7921e-aspm"
+   fi
+-  remove_managed_config "$MT7921E_CONF"
++  restore_remove_owned "$MT7921E_CONF" || true
+ 
+   restore_iwlwifi_conf
+   remove_i915_conf
+@@ -1146,22 +1783,31 @@
+     echo "[DRY-RUN] i915 parameters above (update-initramfs -u -k all)."
+   fi
+ 
+-  remove_managed_config /etc/wireplumber/wireplumber.conf.d/50-alsa-powersave.conf
+-  remove_managed_config /etc/wireplumber/main.lua.d/50-alsa-powersave.lua
++  restore_remove_owned /etc/wireplumber/wireplumber.conf.d/50-alsa-powersave.conf || true
++  restore_remove_owned /etc/wireplumber/main.lua.d/50-alsa-powersave.lua || true
+ 
+-  # Remove udev rules
+-  rm -f /etc/udev/rules.d/99-vivobook-power.rules
+-  rm -f /etc/udev/rules.d/99-vivobook-nvme.rules
+-  rm -f /etc/udev/rules.d/99-usb-autosuspend.rules
++  # Remove udev rules (v16 (change 5): script-managed ones only)
++  restore_remove_owned /etc/udev/rules.d/99-vivobook-power.rules || true
++  restore_remove_owned /etc/udev/rules.d/99-vivobook-nvme.rules || true
++  restore_remove_owned /etc/udev/rules.d/99-usb-autosuspend.rules || true
+ 
+   # Remove environment.d snippet
+-  remove_managed_config /etc/environment.d/99-vivobook-vaapi.conf
++  restore_remove_owned /etc/environment.d/99-vivobook-vaapi.conf || true
+ 
+-  # Restore power-profiles-daemon if masked by this script
+-  if [[ -f /etc/default/vivobook-ppd-state ]]; then
+-    local PPD_WAS_PRESENT="false" PPD_WAS_ACTIVE="false" PPD_WAS_ENABLED="false" PPD_WAS_MASKED="false"
+-    # shellcheck disable=SC1091
+-    . /etc/default/vivobook-ppd-state 2>/dev/null || true
++  # Restore power-profiles-daemon if masked by this script.
++  # v16 (change 5): only from a state file this script owns (marker, or the
++  # exact pre-marker PPD_WAS_* format); it is parsed, not sourced.
++  if [[ -f /etc/default/vivobook-ppd-state ]] && ! ppd_state_file_owned /etc/default/vivobook-ppd-state; then
++    echo "   SKIPPED (not script-managed, preserved): /etc/default/vivobook-ppd-state"
++    echo "   power-profiles-daemon was NOT unmasked/re-enabled; inspect that file and"
++    echo "   run 'systemctl unmask power-profiles-daemon.service' yourself if wanted."
++    RESTORE_SKIPPED+=("/etc/default/vivobook-ppd-state")
++  elif [[ -f /etc/default/vivobook-ppd-state ]]; then
++    local PPD_WAS_PRESENT PPD_WAS_ACTIVE PPD_WAS_ENABLED PPD_WAS_MASKED
++    PPD_WAS_PRESENT="$(ppd_state_value /etc/default/vivobook-ppd-state PPD_WAS_PRESENT)"
++    PPD_WAS_ACTIVE="$(ppd_state_value /etc/default/vivobook-ppd-state PPD_WAS_ACTIVE)"
++    PPD_WAS_ENABLED="$(ppd_state_value /etc/default/vivobook-ppd-state PPD_WAS_ENABLED)"
++    PPD_WAS_MASKED="$(ppd_state_value /etc/default/vivobook-ppd-state PPD_WAS_MASKED)"
+     if [[ "$PPD_WAS_PRESENT" == "true" ]]; then
+       if [[ "$PPD_WAS_MASKED" == "false" ]]; then
+         systemctl unmask power-profiles-daemon.service >/dev/null 2>&1 || true
+@@ -1173,7 +1819,11 @@
+         fi
+       fi
+     fi
+-    rm -f /etc/default/vivobook-ppd-state
++    if [[ "$DRY_RUN" == true ]]; then
++      echo "[DRY-RUN] Would remove (script-managed): /etc/default/vivobook-ppd-state"
++    else
++      command rm -f /etc/default/vivobook-ppd-state
++    fi
+   fi
+ 
+   # Restore user browser flags
+@@ -1188,6 +1838,10 @@
+   done < /etc/passwd
+ 
+   # Restore original CPU turbo state.
++  # v16 (change 5): this and the igpu-defaults file below keep their v15.3
++  # legacy rule (removed after use): no v15.x/v16 code path writes them, so
++  # they can only come from pre-v15 releases of this script, which predate the
++  # marker.
+   # LEGACY (pre-v15 installs only, I-32): no v15.x code path writes
+   # /etc/default/vivobook-pstate-defaults. The branch is kept so a machine
+   # still carrying the file from an older release can restore no_turbo.
+@@ -1310,6 +1964,16 @@
+       fi
+     fi
+   fi
++  # v16 (change 12): say which unmanaged files will re-apply managed keys.
++  local ro_rows ro_file ro_key ro_val
++  ro_rows="$(sysctl_unmanaged_overrides)"
++  if [[ -n "$ro_rows" ]]; then
++    while IFS=$'\t' read -r ro_file ro_key ro_val _; do
++      [[ -n "$ro_file" ]] || continue
++      echo "   NOTE: $ro_file (not script-managed, left untouched) sets $ro_key = $ro_val;"
++      echo "   NOTE: 'sysctl --system' and the next boot re-apply it."
++    done <<< "$ro_rows"
++  fi
+   command -v sysctl >/dev/null 2>&1 && sysctl --system >/dev/null 2>&1 || true
+   echo "Managed configuration removed."
+   if (( BAT_RESTORE_OK > 0 )); then
+@@ -1322,11 +1986,29 @@
+   echo "CPU max_perf_pct reset to 100 where writable; swappiness, writeback and (when BBR was managed) tcp_congestion_control reset, then distro sysctls reapplied."
+   echo "Reboot to reset remaining live module, RAPL, and other hardware settings."
+   echo "No apt packages were removed."
++  # v16 (change 5): list what was preserved so nothing is silently left behind.
++  if (( ${#RESTORE_SKIPPED[@]} > 0 )); then
++    echo "Preserved ${#RESTORE_SKIPPED[@]} path(s) without the 'Managed by vivobook_optimize' marker:"
++    local rs
++    for rs in ${RESTORE_SKIPPED[@]+"${RESTORE_SKIPPED[@]}"}; do
++      echo "  - $rs"
++    done
++    echo "If one of them was written by a pre-v15.3 release of this script (before markers),"
++    echo "check its content and remove it manually."
++  fi
++  if (( ${#RESTORE_FAILED[@]} > 0 )); then
++    echo "WARNING: ${#RESTORE_FAILED[@]} script-managed path(s) could not be removed:" >&2
++    local rf
++    for rf in ${RESTORE_FAILED[@]+"${RESTORE_FAILED[@]}"}; do
++      echo "  - $rf" >&2
++    done
++  fi
++  (( ${#RESTORE_FAILED[@]} == 0 ))
+ }
+ 
+ log_summary() {
+   if [[ "$DRY_RUN" == true ]]; then
+-    echo "[DRY-RUN] Append v15.3 run summary to /var/log/vivobook-optimize.log"
++    echo "[DRY-RUN] Append v16 run summary to /var/log/vivobook-optimize.log"
+     return 0
+   fi
+   local reboot=no
+@@ -1347,7 +2029,7 @@
+   local guc_lines va_output va_driver card wp_ver
+ 
+   echo "===================================================="
+-  echo "ASUS Vivobook Optimization v15.3 — System Status"
++  echo "ASUS Vivobook Optimization v16 — System Status"
+   echo "Generated: $(date)"
+   echo "Script: $SCRIPT_NAME version $SCRIPT_VERSION (JSON schema $SCRIPT_SCHEMA)"
+   echo "===================================================="
+@@ -1395,6 +2077,21 @@
+       echo "  Running kernel:         sbverify not installed; skipping signature check"
+       ;;
+   esac
++  # v16 (change 8): the newest installed image is what boots next by default.
++  local newest_k
++  newest_k="$(newest_installed_kernel_image)"
++  if [[ -z "$newest_k" ]]; then
++    echo "  Newest installed kernel: no /boot/vmlinuz-* found"
++  elif [[ "$newest_k" == "/boot/vmlinuz-$(uname -r)" ]]; then
++    echo "  Newest installed kernel: the running kernel"
++  else
++    case "$(kernel_image_signature_state "$newest_k")" in
++      signed-by-vivobook-key) echo "  Newest installed kernel: $newest_k — signed by CN=Vivobook Kernel Key" ;;
++      signed-by-other)        echo "  Newest installed kernel: $newest_k — signed, but NOT by CN=Vivobook Kernel Key" ;;
++      unsigned)               echo "  Newest installed kernel: $newest_k — NO readable signature" ;;
++      *)                      echo "  Newest installed kernel: $newest_k — signature not checked (sbverify not installed)" ;;
++    esac
++  fi
+ 
+   echo
+   echo "[Kernel source pin]"
+@@ -1425,7 +2122,7 @@
+   fi
+ 
+   echo
+-  echo "[Power-management ownership (v15.3)]"
++  echo "[Power-management ownership (v16)]"
+   detect_power_managers
+   printf '  TLP:        present=%s active=%s%s\n' "$TLP_PRESENT" "$TLP_ACTIVE" "${TLP_VERSION:+ (version $TLP_VERSION)}"
+   echo "  power-profiles-daemon active: $PPD_ACTIVE"
+@@ -1451,11 +2148,8 @@
+   if [[ "$found" == false ]]; then
+     echo "  Unsupported or no battery threshold attribute found."
+   fi
+-  if systemctl is-enabled --quiet battery-charge-threshold.service 2>/dev/null; then
+-    echo "  Persistent service: enabled"
+-  else
+-    echo "  Persistent service: disabled/not installed"
+-  fi
++  # v16 (change 7): enabled / installed-disabled / not-installed + hook guard.
++  persistent_service_line battery-charge-threshold.service vivobook-battery
+   if [[ -x /usr/lib/systemd/system-sleep/vivobook-battery ]]; then
+     echo "  Resume re-apply hook: present (/usr/lib/systemd/system-sleep/vivobook-battery)"
+   else
+@@ -1465,11 +2159,16 @@
+   echo
+   echo "[Battery health]"
+   found=false
+-  while IFS=$'\t' read -r bh_name bh_full bh_design bh_cycles bh_health; do
++  while IFS=$'\t' read -r bh_name bh_full bh_design bh_cycles bh_health bh_unit; do
+     [[ -n "$bh_name" ]] || continue
+     found=true
+-    printf '  %-12s charge_full=%s  charge_full_design=%s (uAh)  cycles=%s  health=%s\n' \
+-      "$bh_name" "$bh_full" "$bh_design" "$bh_cycles" "$bh_health"
++    case "$bh_unit" in
++      uWh) bh_prefix=energy ;;
++      *)   bh_prefix=charge ;;
++    esac
++    printf '  %-12s %s_full=%s  %s_full_design=%s (%s)  cycles=%s  health=%s%s\n' \
++      "$bh_name" "$bh_prefix" "$bh_full" "$bh_prefix" "$bh_design" "$bh_unit" "$bh_cycles" \
++      "$bh_health" "$([[ "$bh_health" =~ ^[0-9.]+$ ]] && printf '%%')"
+   done < <(battery_health_rows)
+   if [[ "$found" == false ]]; then
+     echo "  No battery devices found."
+@@ -1509,11 +2208,8 @@
+       echo "  No supported profile interface found."
+     fi
+   fi
+-  if systemctl is-enabled --quiet asus-thermal-profile.service 2>/dev/null; then
+-    echo "  Persistent service: enabled"
+-  else
+-    echo "  Persistent service: disabled/not installed"
+-  fi
++  # v16 (change 7): enabled / installed-disabled / not-installed + hook guard.
++  persistent_service_line asus-thermal-profile.service vivobook-thermal-profile
+ 
+   echo
+   echo "[Intel P-State / Dynamic Turbo / EPP]"
+@@ -1553,11 +2249,8 @@
+   else
+     echo "  No energy_performance_preference nodes found."
+   fi
+-  if systemctl is-enabled --quiet intel-epp-profile.service 2>/dev/null; then
+-    echo "  Persistent service: enabled"
+-  else
+-    echo "  Persistent service: disabled/not installed"
+-  fi
++  # v16 (change 7): enabled / installed-disabled / not-installed + hook guard.
++  persistent_service_line intel-epp-profile.service vivobook-intel-epp
+ 
+   echo
+   echo "[Power coherence]"
+@@ -1608,22 +2301,29 @@
+   else
+     echo "  /sys/power/mem_sleep: unavailable"
+   fi
+-  local pmc_dir=/sys/kernel/debug/pmc_core
++  local pmc_dir="$PMC_CORE_DIR"
+   if [[ -r "$pmc_dir/package_cstate_show" ]]; then
+-    local pc8 pc10
+-    pc8="$(awk -F: '/Package C8/ {gsub(/^[ \t]+/, "", $2); print $2}' "$pmc_dir/package_cstate_show" 2>/dev/null || true)"
+-    pc10="$(awk -F: '/Package C10/ {gsub(/^[ \t]+/, "", $2); print $2}' "$pmc_dir/package_cstate_show" 2>/dev/null || true)"
+-    echo "  PC8 residency:     ${pc8:-not reported}"
+-    echo "  PC10 residency:    ${pc10:-not reported}"
++    # v16 (change 10): exact-label reads; PC6 added (values in usec).
++    local pc6 pc8 pc10
++    pc6="$(pmc_pkg_cstate 6)"
++    pc8="$(pmc_pkg_cstate 8)"
++    pc10="$(pmc_pkg_cstate 10)"
++    echo "  PC6 residency:     ${pc6:+$pc6 usec}${pc6:-not reported}"
++    echo "  PC8 residency:     ${pc8:+$pc8 usec}${pc8:-not reported}"
++    echo "  PC10 residency:    ${pc10:+$pc10 usec}${pc10:-not reported}"
+     if [[ -n "$pc10" && "$pc10" != "0" ]]; then
+       echo "  Deep C-states:     PC10 reached (deep package idle is working)"
+     elif [[ -n "$pc8" && "$pc8" != "0" ]]; then
+-      echo "  Deep C-states:     PC8 reached, PC10 never entered (check ASPM/USB/audio wakeups)"
++      echo "  Deep C-states:     PC8 reached, PC10 not (informational — S0ix is judged by the"
++      echo "                     SLP_S0 / S0i3 residency below, not by PC10)"
++    elif aspm_workaround_live; then
++      echo "  Deep C-states:     neither PC8 nor PC10 reached — consistent with the LIVE"
++      echo "                     mt7921e disable_aspm=1 fallback, which blocks PCIe L1.x on"
++      echo "                     the Wi-Fi link (on this machine it kept PC6/PC8/S0i3 at 0"
++      echo "                     before kernel 7.2.6). Remove it if Wi-Fi is stable without it."
+     elif aspm_workaround_active; then
+-      echo "  Deep C-states:     neither PC8 nor PC10 reached — EXPECTED: the mt7921e"
+-      echo "                     ASPM workaround (disable_aspm=1) blocks the deep package"
+-      echo "                     idle paths on this platform. Not a fault; do not chase"
+-      echo "                     ASPM here."
++      echo "  Deep C-states:     neither PC8 nor PC10 reached. disable_aspm=1 is staged in"
++      echo "                     $MT7921E_CONF but NOT live, so it is not the cause in this boot."
+     else
+       echo "  Deep C-states:     neither PC8 nor PC10 reached since boot"
+     fi
+@@ -1637,6 +2337,23 @@
+   if [[ -r "$pmc_dir/slp_s0_residency_usec" ]]; then
+     echo "  SLP_S0 residency:  $(status_value "$pmc_dir/slp_s0_residency_usec") usec"
+   fi
++  # v16 (change 10): S0i2/S0i3 only from a validated substate_residencies file.
++  local s0ix_rows s0ix_name s0ix_val
++  if s0ix_rows="$(pmc_substate_rows)"; then
++    echo "  S0ix substates:    (source: $pmc_dir/substate_residencies)"
++    while IFS=$'\t' read -r s0ix_name s0ix_val; do
++      [[ -n "$s0ix_name" ]] || continue
++      printf '    %-8s %s usec\n' "$s0ix_name" "$s0ix_val"
++    done <<< "$s0ix_rows"
++    echo "  S0i2 total:        $(pmc_substate_sum 2 || true) usec"
++    echo "  S0i3 total:        $(pmc_substate_sum 3 || true) usec"
++  else
++    echo "  S0i2/S0i3:         unavailable (no readable substate_residencies in the expected"
++    echo "                     format; not inferred from SLP_S0)"
++  fi
++  if [[ -r "$pmc_dir/package_cstate_show" || -r "$pmc_dir/slp_s0_residency_usec" ]]; then
++    echo "  (Residency counters are cumulative since boot, not per suspend.)"
++  fi
+   if [[ -r /sys/devices/system/cpu/cpuidle/current_driver ]]; then
+     echo "  cpuidle driver:    $(status_value /sys/devices/system/cpu/cpuidle/current_driver)"
+   fi
+@@ -1672,7 +2389,11 @@
+ 
+   echo
+   echo "[i915 GuC/HuC]"
+-  if [[ -d /sys/module/i915 ]]; then
++  # v16 (change 9): driven by the BOUND DRM driver. On the reference machine
++  # i915 is loaded but xe drives the iGPU, so i915's enable_guc is irrelevant.
++  local gfx_drv
++  gfx_drv="$(detect_active_drm_driver)"
++  if [[ "$gfx_drv" == i915 && -d /sys/module/i915 ]]; then
+     echo "  enable_guc: $(status_value /sys/module/i915/parameters/enable_guc)"
+     guc_lines="$(
+       dmesg 2>/dev/null |
+@@ -1684,10 +2405,17 @@
+     else
+       echo "  No matching GuC/HuC lines available in the current dmesg buffer."
+     fi
+-  elif [[ -d /sys/module/xe ]]; then
+-    echo "  Active graphics module is xe; i915 enable_guc is not applicable."
++  elif [[ "$gfx_drv" == xe ]]; then
++    if [[ -d /sys/module/i915 ]]; then
++      echo "  Bound DRM driver is xe; i915 is loaded but not driving the iGPU, so its"
++      echo "  enable_guc is not applicable (xe uses GuC submission + SLPC by design)."
++    else
++      echo "  Bound DRM driver is xe; i915 enable_guc is not applicable."
++    fi
++  elif [[ "$gfx_drv" != unknown ]]; then
++    echo "  Bound DRM driver is $gfx_drv; i915 enable_guc is not applicable."
+   else
+-    echo "  Neither i915 nor xe appears loaded."
++    echo "  No DRM driver is bound to a card (neither i915 nor xe drives the display)."
+   fi
+ 
+   echo
+@@ -1773,6 +2501,51 @@
+     echo "  Managed config:      absent"
+   fi
+ 
++  # v16 (change 6): staged vs live snd_hda_intel power-save, read-only.
++  echo
++  echo "[HD Audio power save]"
++  local a_ps a_psc a_verdict a_opts
++  a_ps="$(audio_hda_param power_save)"
++  a_psc="$(audio_hda_param power_save_controller)"
++  echo "  Live snd_hda_intel:  power_save=$a_ps power_save_controller=$a_psc"
++  if audio_sof_loaded; then
++    echo "  Intel SOF:           loaded (snd_hda_intel can still expose power_save alongside SOF)"
++  else
++    echo "  Intel SOF:           not loaded"
++  fi
++  if [[ -f "$AUDIO_CONF" ]]; then
++    a_opts="$(audio_staged_options)"
++    if is_managed_file "$AUDIO_CONF"; then
++      if audio_conf_is_legacy_content "$AUDIO_CONF"; then
++        echo "  Staged file:         $AUDIO_CONF (script-managed, as written by this script)"
++      else
++        echo "  Staged file:         $AUDIO_CONF (script-marked, options edited — preserved)"
++      fi
++    else
++      echo "  Staged file:         $AUDIO_CONF (not script-managed)"
++    fi
++    echo "  Staged options:      ${a_opts:-none for snd_hda_intel}"
++  else
++    echo "  Staged file:         absent"
++  fi
++  a_verdict="$(audio_staged_verdict)"
++  case "$a_verdict" in
++    staged-differs-from-live)
++      echo "  Verdict:             staged differs from live — applies on next module load/reboot" ;;
++    match)
++      echo "  Verdict:             staged matches live" ;;
++    live-unavailable)
++      echo "  Verdict:             live parameters not exposed; staged values apply at module load" ;;
++    no-hda-options)
++      echo "  Verdict:             staged file has no snd_hda_intel options" ;;
++    *)
++      echo "  Verdict:             nothing staged (module defaults at load)" ;;
++  esac
++  if systemctl is-enabled --quiet vivobook-power-switch.service 2>/dev/null; then
++    echo "  Note: --with-auto-power is enabled; it writes live power_save 0 on AC and 1 on"
++    echo "        battery. The staged value only applies at module load."
++  fi
++
+   echo
+   echo "[USB Runtime Autosuspend]"
+   if [[ -f /etc/udev/rules.d/99-usb-autosuspend.rules ]]; then
+@@ -1780,6 +2553,31 @@
+   else
+     echo "  Managed udev rule: absent"
+   fi
++  # v16 (change 15): read-only check of devices the rule exempts.
++  local ux_rows ux_dev ux_cls ux_ctl ux_prod ux_applicable=false ux_mismatch=0
++  is_managed_file /etc/udev/rules.d/99-usb-autosuspend.rules && ux_applicable=true
++  ux_rows="$(usb_exempt_class_rows)"
++  if [[ -n "$ux_rows" ]]; then
++    echo "  Exempt-class devices (interface class 03/e0/01/0e):"
++    while IFS=$'\t' read -r ux_dev ux_cls ux_ctl ux_prod; do
++      [[ -n "$ux_dev" ]] || continue
++      if [[ "$ux_ctl" == auto && "$ux_applicable" == true ]]; then
++        printf '    %-8s class %-8s power/control=%-5s MISMATCH (%s)\n' "$ux_dev" "$ux_cls" "$ux_ctl" "$ux_prod"
++        ux_mismatch=$((ux_mismatch + 1))
++      else
++        printf '    %-8s class %-8s power/control=%-5s (%s)\n' "$ux_dev" "$ux_cls" "$ux_ctl" "$ux_prod"
++      fi
++    done <<< "$ux_rows"
++    if (( ux_mismatch > 0 )); then
++      echo "  MISMATCH: the managed rule should hold these at 'on'. Something set 'auto' after"
++      echo "  the rule ran (e.g. btusb enable_autosuspend, powertop --auto-tune, or another"
++      echo "  rule). Report only — nothing was changed."
++    elif [[ "$ux_applicable" != true ]]; then
++      echo "  (Informational: the managed rule is not installed, so 'auto' is not a mismatch.)"
++    fi
++  else
++    echo "  Exempt-class devices: none found"
++  fi
+ 
+   echo
+   echo "[power-profiles-daemon Conflict State]"
+@@ -1831,6 +2629,33 @@
+     echo "  Managed BBR config:  absent"
+   fi
+ 
++  # v16 (change 12): report (never edit) unmanaged files setting managed keys.
++  echo
++  echo "[Unmanaged sysctl overrides of managed keys]"
++  local so_rows so_file so_key so_val so_applies so_mf so_bbr=false
++  so_rows="$(sysctl_unmanaged_overrides)"
++  if [[ -z "$so_rows" ]]; then
++    echo "  none found"
++  else
++    while IFS=$'\t' read -r so_file so_key so_val so_applies so_mf; do
++      [[ -n "$so_file" ]] || continue
++      case "$so_applies" in
++        after)  so_applies="applied AFTER ${so_mf##*/} — this value wins" ;;
++        before) so_applies="applied before ${so_mf##*/} — the managed value wins" ;;
++        *)      so_applies="managed file absent — set by this file" ;;
++      esac
++      echo "  $so_file: $so_key = $so_val ($so_applies)"
++      case "$so_key" in
++        net.core.default_qdisc|net.ipv4.tcp_congestion_control) so_bbr=true ;;
++      esac
++    done <<< "$so_rows"
++    echo "  Report only: this script never edits files it does not manage."
++    if [[ "$so_bbr" == true ]]; then
++      echo "  NOTE: --restore-defaults resets tcp_congestion_control to cubic, but the file(s)"
++      echo "        above re-apply their value on 'sysctl --system' / next boot."
++    fi
++  fi
++
+   echo
+   echo "[Wi-Fi Driver / Power Save]"
+   wifi_found=false
+@@ -1879,10 +2704,15 @@
+   else
+     echo "  Config:                $MT7921E_CONF absent"
+   fi
+-  if aspm_workaround_active; then
+-    echo "  ASPM workaround:       active — PC8/PC10 absence is expected (not a fault)"
++  # v16 (change 2): state-driven — live vs staged vs not configured.
++  if aspm_workaround_live; then
++    echo "  ASPM workaround:       LIVE (disable_aspm=Y) — PCIe L1.x blocked on the Wi-Fi link;"
++    echo "                         deep package C-states / S0i3 are limited while it is live"
++  elif aspm_workaround_active; then
++    echo "  ASPM workaround:       staged in config, not live (applies at next module load/reboot)"
+   else
+-    echo "  ASPM workaround:       not active — Wi-Fi may be unstable on this platform"
++    echo "  ASPM workaround:       not configured — driver-default ASPM (live disable_aspm=$(mt7921e_disable_aspm_live));"
++    echo "                         optional fallback: --with-mt7921e-aspm, only if the link is unstable"
+   fi
+ 
+   echo
+@@ -1945,26 +2775,25 @@
+   echo "[Intel RAPL Power Limits]"
+   found=false
+   # v15.3 (I-01/I-20): one shared enumerator (rapl_constraint_files) drives both
+-  # the dashboard and --status-json, deduped by canonical sysfs path. The lock
+-  # state is probed per constraint: on this machine PL1 is MSR-locked by the
+-  # BIOS while PL2 is writable, and a single PL1-only probe used to hide that.
++  # the dashboard and --status-json, deduped by canonical sysfs path.
++  # v16 (change 4): --status is READ-ONLY. The v15.3 per-constraint lock probe
++  # wrote the current value back (even as root via sudo --status); it now runs
++  # only in the mutating --pl1/--pl2 path. Here the lock state is not probed.
+   while IFS=$'\t' read -r rapl_zone rapl_file rapl_label; do
+     [[ -n "$rapl_file" ]] || continue
+     found=true
+-    local rapl_name rapl_uw rapl_watts rapl_lock
++    local rapl_name rapl_uw rapl_watts
+     rapl_name="$(cat "$(dirname "$rapl_file")/name" 2>/dev/null || echo "$rapl_zone")"
+     rapl_uw="$(cat "$rapl_file" 2>/dev/null || echo 0)"
+     rapl_watts="$(awk "BEGIN {printf \"%.1f\", $rapl_uw / 1000000}" 2>/dev/null || echo "$rapl_uw")"
+-    rapl_lock="$(rapl_probe_lock_state "$rapl_file")"
+-    printf '  %-12s %-6s %s W (lock probe: %s)\n' "$rapl_name" "$rapl_label" "$rapl_watts" "$rapl_lock"
++    printf '  %-12s %-6s %s W (lock: unknown (read-only))\n' "$rapl_name" "$rapl_label" "$rapl_watts"
+   done < <(rapl_constraint_files)
+   if [[ "$found" == false ]]; then
+     echo "  No RAPL powercap interface found."
+   else
+-    if (( EUID != 0 )); then
+-      echo "  (Lock state requires root: the probe writes the current value back and"
+-      echo "   reports 'unknown (needs root)' otherwise. No register is changed.)"
+-    fi
++    echo "  (Status never writes RAPL registers. The firmware-lock state is probed only"
++    echo "   by a real run with --pl1/--pl2; on this machine PL1 is documented as"
++    echo "   firmware-locked and PL2 as writable.)"
+   fi
+   if systemctl is-enabled --quiet rapl-power-limits.service 2>/dev/null; then
+     echo "  Persistent service: enabled"
+@@ -2009,11 +2838,8 @@
+ 
+   echo
+   echo "[Keyboard Backlight Timeout]"
+-  if systemctl is-enabled --quiet vivobook-kbd-timeout.service 2>/dev/null; then
+-    echo "  Persistent service: enabled"
+-  else
+-    echo "  Persistent service: disabled/not installed"
+-  fi
++  # v16 (change 7): enabled / installed-disabled / not-installed + hook guard.
++  persistent_service_line vivobook-kbd-timeout.service vivobook-kbd-timeout
+   local KBD_LED=/sys/class/leds/asus::kbd_backlight
+   if [[ -d "$KBD_LED" ]]; then
+     echo "  Backlight device: present"
+@@ -2057,6 +2883,15 @@
+   echo "    \"signing_hook_path\": $(json_string "$SIGNING_HOOK"),"
+   echo "    \"running_kernel_signature\": $(json_string "$(running_kernel_signature_state)"),"
+   echo "    \"running_kernel\": $(json_string "/boot/vmlinuz-$(uname -r)"),"
++  local newest_kj
++  newest_kj="$(newest_installed_kernel_image)"
++  if [[ -n "$newest_kj" ]]; then
++    echo "    \"newest_kernel_image\": $(json_string "$newest_kj"),"
++    echo "    \"newest_kernel_signature\": $(json_string "$(kernel_image_signature_state "$newest_kj")"),"
++  else
++    echo "    \"newest_kernel_image\": null,"
++    echo "    \"newest_kernel_signature\": null,"
++  fi
+   echo "    \"sbverify_installed\": $(command -v sbverify >/dev/null 2>&1 && echo true || echo false)"
+   echo "  },"
+   echo "  \"kernel_pin\": {"
+@@ -2121,11 +2956,12 @@
+   fi
+   local batt_hook=false
+   [[ -x /usr/lib/systemd/system-sleep/vivobook-battery ]] && batt_hook=true
+-  echo "    \"resume_hook_present\": $batt_hook"
++  echo "    \"resume_hook_present\": $batt_hook,"
++  echo "    \"service_state\": $(json_string "$(unit_install_state battery-charge-threshold.service)")"
+   echo "  },"
+   echo "  \"battery_health\": {"
+-  local bh_seen=false bh_name bh_full bh_design bh_cycles bh_health
+-  while IFS=$'\t' read -r bh_name bh_full bh_design bh_cycles bh_health; do
++  local bh_seen=false bh_name bh_full bh_design bh_cycles bh_health bh_unit
++  while IFS=$'\t' read -r bh_name bh_full bh_design bh_cycles bh_health bh_unit; do
+     [[ -n "$bh_name" ]] || continue
+     bh_seen=true
+     if [[ "$bh_full" =~ ^[0-9]+$ ]]; then bh_full_j="$bh_full"; else bh_full_j=null; fi
+@@ -2133,8 +2969,24 @@
+     if [[ "$bh_cycles" =~ ^[0-9]+$ ]]; then bh_cycles_j="$bh_cycles"; else bh_cycles_j=null; fi
+     if [[ "$bh_health" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then bh_health_j="$bh_health"; else bh_health_j=null; fi
+     echo "    \"device\": $(json_string "$bh_name"),"
+-    echo "    \"charge_full_uah\": $bh_full_j,"
+-    echo "    \"charge_full_design_uah\": $bh_design_j,"
++    # v16 (change 11): the *_uah keys stay unit-pure (null for energy_* data);
++    # full/full_design/unit carry whichever pair the battery reports.
++    if [[ "$bh_unit" == uAh ]]; then
++      echo "    \"charge_full_uah\": $bh_full_j,"
++      echo "    \"charge_full_design_uah\": $bh_design_j,"
++    else
++      echo "    \"charge_full_uah\": null,"
++      echo "    \"charge_full_design_uah\": null,"
++    fi
++    if [[ "$bh_unit" == unavailable ]]; then
++      echo "    \"full\": null,"
++      echo "    \"full_design\": null,"
++      echo "    \"unit\": null,"
++    else
++      echo "    \"full\": $bh_full_j,"
++      echo "    \"full_design\": $bh_design_j,"
++      echo "    \"unit\": $(json_string "$bh_unit"),"
++    fi
+     echo "    \"cycle_count\": $bh_cycles_j,"
+     echo "    \"health_percent\": $bh_health_j"
+     break
+@@ -2143,6 +2995,9 @@
+     echo "    \"device\": null,"
+     echo "    \"charge_full_uah\": null,"
+     echo "    \"charge_full_design_uah\": null,"
++    echo "    \"full\": null,"
++    echo "    \"full_design\": null,"
++    echo "    \"unit\": null,"
+     echo "    \"cycle_count\": null,"
+     echo "    \"health_percent\": null"
+   fi
+@@ -2177,6 +3032,7 @@
+     echo "    \"interface\": null,"
+     echo "    \"active\": null"
+   fi
++  echo "    ,\"service_state\": $(json_string "$(unit_install_state asus-thermal-profile.service)")"
+   echo "  },"
+ 
+   echo "  \"cpu\": {"
+@@ -2184,6 +3040,7 @@
+   echo "    \"intel_pstate_status\": $(json_string "$(status_value /sys/devices/system/cpu/intel_pstate/status)"),"
+   echo "    \"no_turbo\": $(json_string "$(status_value /sys/devices/system/cpu/intel_pstate/no_turbo)"),"
+   echo "    \"max_perf_pct\": $(json_string "$(status_value /sys/devices/system/cpu/intel_pstate/max_perf_pct)"),"
++  echo "    \"epp_service_state\": $(json_string "$(unit_install_state intel-epp-profile.service)"),"
+   declare -A EPP_COUNTS=()
+   for f in /sys/devices/system/cpu/cpufreq/policy*/energy_performance_preference; do
+     [[ -r "$f" ]] || continue
+@@ -2213,12 +3070,15 @@
+     echo "    \"active_mode\": null,"
+   fi
+   echo "    \"s2idle_active\": $ms_s2idle,"
+-  local pmc_dir=/sys/kernel/debug/pmc_core
+-  local pc8_j="null" pc10_j="null" slp_s0_j="null" pmc_avail=false
++  local pmc_dir="$PMC_CORE_DIR"
++  local pc6_j="null" pc8_j="null" pc10_j="null" slp_s0_j="null" pmc_avail=false
+   if [[ -r "$pmc_dir/package_cstate_show" ]]; then
+     pmc_avail=true
+-    pc8_j="$(awk -F: '/Package C8/ {gsub(/[ \t]+/, "", $2); print $2}' "$pmc_dir/package_cstate_show" 2>/dev/null || true)"
+-    pc10_j="$(awk -F: '/Package C10/ {gsub(/[ \t]+/, "", $2); print $2}' "$pmc_dir/package_cstate_show" 2>/dev/null || true)"
++    # v16 (change 10): exact-label reads (shared helper), PC6 added.
++    pc6_j="$(pmc_pkg_cstate 6)"
++    pc8_j="$(pmc_pkg_cstate 8)"
++    pc10_j="$(pmc_pkg_cstate 10)"
++    [[ "$pc6_j" =~ ^[0-9]+$ ]] || pc6_j="null"
+     [[ "$pc8_j" =~ ^[0-9]+$ ]] || pc8_j="null"
+     [[ "$pc10_j" =~ ^[0-9]+$ ]] || pc10_j="null"
+   fi
+@@ -2233,8 +3093,8 @@
+   local aspm_wa=false deep_expected=false
+   if aspm_workaround_active; then
+     aspm_wa=true
+-    # v15.3 (I-22): PC8/PC10 == 0 is the documented consequence of
+-    # disable_aspm=1 on this platform, not a fault to chase.
++    # v15.3 (I-22) semantics kept for this key: no deep PC state while the
++    # workaround is live or staged. v16: see aspm_workaround_live for "live".
+     [[ "$deep_ok" == false ]] && deep_expected=true
+   fi
+   echo "    \"pmc_core_available\": $pmc_avail,"
+@@ -2242,8 +3102,41 @@
+   echo "    \"pc10_residency\": $pc10_j,"
+   echo "    \"deep_pc_states_reached\": $deep_ok,"
+   echo "    \"aspm_workaround_active\": $aspm_wa,"
++  echo "    \"aspm_workaround_live\": $(aspm_workaround_live && echo true || echo false),"
+   echo "    \"deep_pc_states_expected_absent\": $deep_expected,"
+   echo "    \"slp_s0_residency_usec\": $slp_s0_j,"
++  # v16 (change 10): additive keys. Units: usec. Cumulative since boot.
++  echo "    \"pc6_residency\": $pc6_j,"
++  local pcs_first=true pcs_name pcs_val
++  printf '    "package_cstates": {'
++  while IFS=$'\t' read -r pcs_name pcs_val; do
++    [[ -n "$pcs_name" ]] || continue
++    if [[ "$pcs_first" == true ]]; then pcs_first=false; else printf ','; fi
++    printf ' %s: %s' "$(json_string "$pcs_name")" "$pcs_val"
++  done < <(pmc_pkg_cstate_rows)
++  echo " },"
++  local sx_rows sx_name sx_val sx_first=true
++  if sx_rows="$(pmc_substate_rows)"; then
++    printf '    "s0ix_substates": {'
++    while IFS=$'\t' read -r sx_name sx_val; do
++      [[ -n "$sx_name" ]] || continue
++      if [[ "$sx_first" == true ]]; then sx_first=false; else printf ','; fi
++      printf ' %s: %s' "$(json_string "$sx_name")" "$sx_val"
++    done <<< "$sx_rows"
++    echo " },"
++    local sx2 sx3
++    sx2="$(pmc_substate_sum 2 || true)"; [[ "$sx2" =~ ^[0-9]+$ ]] || sx2=null
++    sx3="$(pmc_substate_sum 3 || true)"; [[ "$sx3" =~ ^[0-9]+$ ]] || sx3=null
++    echo "    \"s0i2_residency_usec\": $sx2,"
++    echo "    \"s0i3_residency_usec\": $sx3,"
++    echo "    \"s0ix_substate_source\": $(json_string "$pmc_dir/substate_residencies"),"
++  else
++    echo "    \"s0ix_substates\": null,"
++    echo "    \"s0i2_residency_usec\": null,"
++    echo "    \"s0i3_residency_usec\": null,"
++    echo "    \"s0ix_substate_source\": null,"
++  fi
++  echo "    \"residency_counters\": \"cumulative_since_boot\","
+   echo "    \"cpuidle_driver\": $(json_string "$(status_value /sys/devices/system/cpu/cpuidle/current_driver)")"
+   echo "  },"
+ 
+@@ -2292,15 +3185,14 @@
+ 
+   echo "  \"i915\": {"
+   # v15.3 (I-20): fixed 5-key shape regardless of which DRM module is loaded.
+-  if [[ -d /sys/module/i915 ]]; then
+-    smod=i915
+-  elif [[ -d /sys/module/xe ]]; then
+-    smod=xe
+-  else
+-    smod=not_loaded
+-  fi
++  # v16 (change 9 — the one non-additive schema-3 change): "module" names the
++  # BOUND DRM driver (detect_active_drm_driver), not merely a loaded module —
++  # v15.3 said "i915" whenever i915 was loaded, even with xe driving the iGPU.
++  # enable_* are reported only when i915 is the bound driver.
++  smod="$(detect_active_drm_driver)"
++  [[ "$smod" == unknown ]] && smod=not_loaded
+   echo "    \"module\": $(json_string "$smod"),"
+-  if [[ -d /sys/module/i915 ]]; then
++  if [[ "$smod" == i915 && -d /sys/module/i915 ]]; then
+     echo "    \"enable_guc\": $(json_string "$(status_value /sys/module/i915/parameters/enable_guc)"),"
+     echo "    \"enable_fbc\": $(json_string "$(status_value /sys/module/i915/parameters/enable_fbc)"),"
+     echo "    \"enable_psr\": $(json_string "$(status_value /sys/module/i915/parameters/enable_psr)"),"
+@@ -2363,10 +3255,50 @@
+   echo "    \"suspend_timeout_seconds\": 5"
+   echo "  },"
+ 
++  # v16 (change 6): HD-audio power-save, staged vs live (null when unknown).
++  echo "  \"audio\": {"
++  local aj_ps aj_psc aj_ps_j aj_psc_j aj_present=false aj_managed=null aj_legacy=null aj_opts_j=null
++  aj_ps="$(audio_hda_param power_save)"
++  aj_psc="$(audio_hda_param power_save_controller)"
++  if [[ "$aj_ps" =~ ^-?[0-9]+$ ]]; then aj_ps_j="$aj_ps"; else aj_ps_j=null; fi
++  if [[ "$aj_psc" == unavailable ]]; then aj_psc_j=null; else aj_psc_j="$(json_string "$aj_psc")"; fi
++  if [[ -f "$AUDIO_CONF" ]]; then
++    aj_present=true
++    if is_managed_file "$AUDIO_CONF"; then aj_managed=true; else aj_managed=false; fi
++    if audio_conf_is_legacy_content "$AUDIO_CONF"; then aj_legacy=true; else aj_legacy=false; fi
++    aj_opts_j="$(json_string "$(audio_staged_options)")"
++  fi
++  echo "    \"power_save_live\": $aj_ps_j,"
++  echo "    \"power_save_controller_live\": $aj_psc_j,"
++  echo "    \"sof_loaded\": $(audio_sof_loaded && echo true || echo false),"
++  echo "    \"staged_file\": $(json_string "$AUDIO_CONF"),"
++  echo "    \"staged_file_present\": $aj_present,"
++  echo "    \"staged_file_managed\": $aj_managed,"
++  echo "    \"staged_file_script_content\": $aj_legacy,"
++  echo "    \"staged_options\": $aj_opts_j,"
++  echo "    \"staged_vs_live\": $(json_string "$(audio_staged_verdict)")"
++  echo "  },"
++
+   echo "  \"usb_autosuspend\": {"
+   local usb_rule=false
+   [[ -f /etc/udev/rules.d/99-usb-autosuspend.rules ]] && usb_rule=true
+-  echo "    \"rule_present\": $usb_rule"
++  echo "    \"rule_present\": $usb_rule,"
++  # v16 (change 15): read-only exempt-class diagnostic.
++  local uj_rows uj_dev uj_cls uj_ctl uj_prod uj_first=true uj_auto=0 uj_applicable=false
++  is_managed_file /etc/udev/rules.d/99-usb-autosuspend.rules && uj_applicable=true
++  uj_rows="$(usb_exempt_class_rows)"
++  echo "    \"exempt_class_devices\": ["
++  while IFS=$'\t' read -r uj_dev uj_cls uj_ctl uj_prod; do
++    [[ -n "$uj_dev" ]] || continue
++    [[ "$uj_ctl" == auto ]] && uj_auto=$((uj_auto + 1))
++    if [[ "$uj_first" == true ]]; then uj_first=false; else echo ","; fi
++    printf '      { "device": %s, "classes": %s, "power_control": %s, "product": %s }' \
++      "$(json_string "$uj_dev")" "$(json_string "$uj_cls")" "$(json_string "$uj_ctl")" "$(json_string "$uj_prod")"
++  done <<< "$uj_rows"
++  echo ""
++  echo "    ],"
++  echo "    \"exempt_class_devices_on_auto\": $uj_auto,"
++  echo "    \"mismatch_applicable\": $uj_applicable"
+   echo "  },"
+ 
+   echo "  \"power_profiles_daemon\": {"
+@@ -2414,9 +3346,34 @@
+   echo "    \"module_available\": $bbr_avail,"
+   echo "    \"tcp_congestion_control\": $(json_string "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"),"
+   echo "    \"default_qdisc\": $(json_string "$(sysctl -n net.core.default_qdisc 2>/dev/null || echo unknown)"),"
+-  echo "    \"config_present\": $bbr_cfg"
++  echo "    \"config_present\": $bbr_cfg,"
++  # v16 (change 12): unmanaged files that also set BBR keys (report only).
++  local bo_files
++  bo_files="$(sysctl_unmanaged_overrides | awk -F'\t' '$2 == "net.core.default_qdisc" || $2 == "net.ipv4.tcp_congestion_control" { print $1 }' | sort -u)"
++  local bo_first=true bo_f
++  printf '    "unmanaged_override_files": ['
++  while IFS= read -r bo_f; do
++    [[ -n "$bo_f" ]] || continue
++    if [[ "$bo_first" == true ]]; then bo_first=false; else printf ', '; fi
++    printf '%s' "$(json_string "$bo_f")"
++  done <<< "$bo_files"
++  echo "]"
+   echo "  },"
+ 
++  # v16 (change 12): every unmanaged file that sets a managed sysctl key.
++  local sj_rows sj_file sj_key sj_val sj_applies sj_mf sj_first=true
++  sj_rows="$(sysctl_unmanaged_overrides)"
++  echo "  \"sysctl_overrides\": ["
++  while IFS=$'\t' read -r sj_file sj_key sj_val sj_applies sj_mf; do
++    [[ -n "$sj_file" ]] || continue
++    if [[ "$sj_first" == true ]]; then sj_first=false; else echo ","; fi
++    printf '    { "file": %s, "key": %s, "value": %s, "applies": %s, "managed_file": %s }' \
++      "$(json_string "$sj_file")" "$(json_string "$sj_key")" "$(json_string "$sj_val")" \
++      "$(json_string "$sj_applies")" "$(json_string "$sj_mf")"
++  done <<< "$sj_rows"
++  echo ""
++  echo "  ],"
++
+   echo "  \"wifi\": {"
+   local wifi_found=false wifi_first=true
+   echo "    \"interfaces\": ["
+@@ -2445,14 +3402,16 @@
+   echo ""
+   echo "    ],"
+   echo "    \"legacy_iwlwifi_config_present\": $( [[ -f /etc/modprobe.d/iwlwifi.conf ]] && echo true || echo false ),"
+-  # v15.3 (I-03): mt7921e ASPM workaround state.
++  # v15.3 (I-03): mt7921e ASPM workaround state. v16: aspm_workaround_live is
++  # true only when the running module has disable_aspm set (Y/1).
+   echo "    \"mt7921e\": {"
+   echo "      \"in_use\": $(mt7921e_present && echo true || echo false),"
+   echo "      \"config_present\": $( [[ -f "$MT7921E_CONF" ]] && echo true || echo false ),"
+   echo "      \"managed\": $(mt7921e_conf_managed && echo true || echo false),"
+   echo "      \"disable_aspm_1\": $(mt7921e_conf_has_disable_aspm && echo true || echo false),"
+   echo "      \"disable_aspm_live\": $(json_string "$(mt7921e_disable_aspm_live)"),"
+-  echo "      \"aspm_workaround_active\": $(aspm_workaround_active && echo true || echo false)"
++  echo "      \"aspm_workaround_active\": $(aspm_workaround_active && echo true || echo false),"
++  echo "      \"aspm_workaround_live\": $(aspm_workaround_live && echo true || echo false)"
+   echo "    }"
+   echo "  },"
+   echo "  \"timers\": {"
+@@ -2517,17 +3476,15 @@
+     r_uw="$(cat "$rapl_jfile" 2>/dev/null || echo 0)"
+     [[ "$r_uw" =~ ^[0-9]+$ ]] || r_uw=0
+     rapl_limit_out+="    $(json_string "$r_key"): $r_uw"
+-    r_lock="$(rapl_probe_lock_state "$rapl_jfile")"
+-    case "$r_lock" in
+-      locked)   r_lock_j=true ;;
+-      writable) r_lock_j=false ;;
+-      *)        r_lock_j=null ;;
+-    esac
++    # v16 (change 4): read-only — the lock state is not probed here (the probe
++    # is a sysfs write). Keys keep their shape; values are null ("unknown").
++    r_lock_j=null
+     if [[ "$rapl_lock_first" == true ]]; then rapl_lock_first=false; else rapl_lock_out+=",
+ "; fi
+     rapl_lock_out+="    $(json_string "$r_key"): $r_lock_j"
+   done < <(rapl_constraint_files)
+   echo "    \"available\": $rapl_any,"
++  echo "    \"lock_state_probed\": false,"
+   if [[ "$rapl_any" == true ]]; then
+     printf '%s\n' "$rapl_limit_out" | sed 's/^/  /'
+     echo "    ,\"locked\": {"
+@@ -2570,6 +3527,7 @@
+   local kbd_svc
+   kbd_svc="$(systemctl is-enabled vivobook-kbd-timeout.service 2>/dev/null || echo unknown)"
+   echo "    \"service_enabled\": $(json_string "$kbd_svc"),"
++  echo "    \"service_state\": $(json_string "$(unit_install_state vivobook-kbd-timeout.service)"),"
+   if [[ -d /sys/class/leds/asus::kbd_backlight ]]; then
+     echo "    \"device_present\": true,"
+     echo "    \"brightness\": $(json_string "$(cat /sys/class/leds/asus::kbd_backlight/brightness 2>/dev/null || echo unknown)")"
+@@ -2582,6 +3540,21 @@
+   fi
+   echo "  },"
+ 
++  # v16 (change 7): resume hooks — hook guard state + unit install state.
++  echo "  \"sleep_hooks\": {"
++  local sh_first=true sh_pair sh_hook sh_unit
++  for sh_pair in "${SLEEP_HOOK_PAIRS[@]}"; do
++    sh_hook="$SLEEP_HOOK_DIR/${sh_pair%%:*}"
++    sh_unit="${sh_pair#*:}"
++    if [[ "$sh_first" == true ]]; then sh_first=false; else echo ","; fi
++    printf '    %s: { "unit": %s, "hook_state": %s, "unit_state": %s }' \
++      "$(json_string "${sh_pair%%:*}")" "$(json_string "$sh_unit")" \
++      "$(json_string "$(sleep_hook_guard_state "$sh_hook")")" \
++      "$(json_string "$(unit_install_state "$sh_unit")")"
++  done
++  echo ""
++  echo "  },"
++
+   if [[ -e /var/run/reboot-required ]]; then
+     echo "  \"reboot_required\": true"
+   else
+@@ -2596,8 +3569,10 @@
+ # performs no mutations: nothing is written, installed or enrolled.
+ safe_mode_check() {
+   local -a SAFE_FAILS=()
++  # v16 (change 1): informational findings; never change the exit code.
++  local -a SAFE_WARNS=()
+   echo "===================================================="
+-  echo "ASUS Vivobook v15.3 — safe-mode / boot-integrity check"
++  echo "ASUS Vivobook v16 — safe-mode / boot-integrity check"
+   echo "Generated: $(date)"
+   echo "Host: $(status_value /sys/class/dmi/id/product_name) / BIOS $(status_value /sys/class/dmi/id/bios_version)"
+   echo "Kernel: $(uname -r)"
+@@ -2636,7 +3611,7 @@
+   fi
+ 
+   echo
+-  echo "[3/5] Running-kernel signature (/boot/vmlinuz-$(uname -r))"
++  echo "[3/5] Kernel image signatures (running: /boot/vmlinuz-$(uname -r))"
+   case "$(running_kernel_signature_state)" in
+     signed-by-vivobook-key)
+       echo "  OK    signed by CN=Vivobook Kernel Key."
+@@ -2659,6 +3634,37 @@
+       SAFE_FAILS+=("sbverify not installed; kernel signature unverified")
+       ;;
+   esac
++  # v16 (change 8): after a kernel install, GRUB boots the NEWEST image by
++  # default. If that image is not the running one, it must be signed too, or
++  # the next reboot fails under Secure Boot.
++  local newest_img
++  newest_img="$(newest_installed_kernel_image)"
++  if [[ -n "$newest_img" && "$newest_img" != "/boot/vmlinuz-$(uname -r)" ]]; then
++    echo "  Newest installed image: $newest_img (boots by default after reboot)"
++    case "$(kernel_image_signature_state "$newest_img")" in
++      signed-by-vivobook-key)
++        echo "  OK    newest image signed by CN=Vivobook Kernel Key."
++        ;;
++      signed-by-other)
++        echo "  FAIL  newest image is signed, but NOT by CN=Vivobook Kernel Key."
++        SAFE_FAILS+=("newest installed kernel $newest_img is not signed by CN=Vivobook Kernel Key")
++        ;;
++      unsigned)
++        echo "  FAIL  newest image has no readable signature (the signing hook did not run?)."
++        SAFE_FAILS+=("newest installed kernel $newest_img has no readable signature")
++        ;;
++      file-missing)
++        echo "  FAIL  newest image disappeared while checking: $newest_img"
++        SAFE_FAILS+=("newest installed kernel $newest_img could not be read")
++        ;;
++      *)
++        echo "  UNVERIFIED  sbverify is not installed; the newest image cannot be checked."
++        SAFE_FAILS+=("sbverify not installed; newest installed kernel $newest_img unverified")
++        ;;
++    esac
++  elif [[ -n "$newest_img" ]]; then
++    echo "  INFO  the running kernel is the newest installed image."
++  fi
+ 
+   echo
+   echo "[4/5] Secure Boot"
+@@ -2677,28 +3683,67 @@
+       ;;
+   esac
+ 
++  # v16 (change 1): this item is INFORMATIONAL. A missing disable_aspm=1
++  # workaround is not a boot hazard — on the reference machine it was removed
++  # deliberately on kernel 7.2.6 (Wi-Fi 0 errors, S0ix working). The live
++  # parameter and the config are reported separately; the only escalation is a
++  # WARN when mt7921e errors are visible in this boot's kernel log. Nothing in
++  # this item ever adds to SAFE_FAILS.
+   echo
+-  echo "[5/5] MediaTek MT7902 (mt7921e) ASPM workaround"
++  echo "[5/5] MediaTek MT7902 (mt7921e) Wi-Fi link (informational — never fails this gate)"
+   if mt7921e_present; then
+-    echo "  Interface/driver: in use."
+-    if mt7921e_conf_has_disable_aspm; then
+-      if mt7921e_conf_managed; then
+-        echo "  OK    $MT7921E_CONF is script-managed and sets disable_aspm=1."
++    local m_live m_errs m_iface
++    m_live="$(mt7921e_disable_aspm_live)"
++    m_iface="$(mt7921e_bound_iface 2>/dev/null || true)"
++    echo "  INFO  driver in use${m_iface:+ (interface $m_iface)}; live disable_aspm=$m_live"
++    if [[ -f "$MT7921E_CONF" ]]; then
++      local m_owner="not script-managed"
++      mt7921e_conf_managed && m_owner="script-managed"
++      if mt7921e_conf_has_disable_aspm; then
++        echo "  INFO  config: $MT7921E_CONF ($m_owner) sets disable_aspm=1 — the optional ASPM"
++        echo "        fallback is staged."
+       else
+-        echo "  OK    $MT7921E_CONF sets disable_aspm=1 (not script-managed; left alone)."
+-      fi
+-      if [[ "$(mt7921e_disable_aspm_live)" == "unavailable" ]]; then
+-        echo "  NOTE  The running module does not expose disable_aspm; the file applies"
+-        echo "        on the next boot."
++        echo "  INFO  config: $MT7921E_CONF ($m_owner) does not set disable_aspm=1."
+       fi
+     else
+-      echo "  FAIL  mt7921e is in use but $MT7921E_CONF does not set disable_aspm=1 —"
+-      echo "        expect Wi-Fi disconnects/packet loss."
+-      echo "        Fix: sudo bash $SCRIPT_PATH --with-mt7921e-aspm"
+-      SAFE_FAILS+=("mt7921e ASPM workaround missing: $MT7921E_CONF without disable_aspm=1")
++      echo "  INFO  config: $MT7921E_CONF absent — driver-default ASPM (the workaround is an"
++      echo "        optional fallback, not a requirement)."
++    fi
++    case "$m_live" in
++      Y|y|1)
++        if ! mt7921e_conf_has_disable_aspm; then
++          echo "  NOTE  disable_aspm is live but no config sets it; the driver default returns"
++          echo "        at the next module load/reboot."
++        fi
++        ;;
++      unavailable)
++        if mt7921e_conf_has_disable_aspm; then
++          echo "  NOTE  the running module does not expose disable_aspm; the staged file"
++          echo "        applies at the next module load/reboot."
++        fi
++        ;;
++      *)
++        if mt7921e_conf_has_disable_aspm; then
++          echo "  NOTE  disable_aspm=1 is staged but not live; it applies at the next module"
++          echo "        load/reboot."
++        fi
++        ;;
++    esac
++    m_errs="$(mt7921e_error_count)"
++    if [[ "$m_errs" =~ ^[0-9]+$ ]] && (( m_errs > 0 )); then
++      echo "  WARN  $m_errs mt7921e error line(s) in this boot's kernel log (heuristic match)."
++      echo "        Inspect: journalctl -k -b | grep -i mt7921e"
++      echo "        If the Wi-Fi link is actually unstable, the optional fallback is:"
++      echo "          sudo bash $SCRIPT_PATH --with-mt7921e-aspm"
++      SAFE_WARNS+=("mt7921e: $m_errs error line(s) in this boot's kernel log (informational)")
++    elif [[ "$m_errs" == "0" ]]; then
++      echo "  OK    0 mt7921e error lines in this boot's kernel log."
++    else
++      echo "  NOTE  kernel log not readable here (journal/dmesg restricted; try sudo):"
++      echo "        mt7921e errors this boot: unknown."
+     fi
+   else
+-    echo "  N/A   mt7921e is not loaded and no interface is bound; nothing to check."
++    echo "  N/A   mt7921e is not loaded and no interface is bound; nothing to report."
+   fi
+ 
+   echo
+@@ -2706,6 +3751,13 @@
+   if (( ${#SAFE_FAILS[@]} == 0 )); then
+     echo "RESULT: OK — every critical item is present."
+     echo "This machine is safe to reboot (and to install a new kernel)."
++    if (( ${#SAFE_WARNS[@]} > 0 )); then
++      echo "Informational warning(s) (do not affect the result):"
++      local sw
++      for sw in ${SAFE_WARNS[@]+"${SAFE_WARNS[@]}"}; do
++        echo "  - $sw"
++      done
++    fi
+     echo "===================================================="
+     return 0
+   fi
+@@ -2715,6 +3767,12 @@
+   for sf in ${SAFE_FAILS[@]+"${SAFE_FAILS[@]}"}; do
+     echo "  - $sf"
+   done
++  if (( ${#SAFE_WARNS[@]} > 0 )); then
++    echo "Informational warning(s) (not counted above):"
++    for sf in ${SAFE_WARNS[@]+"${SAFE_WARNS[@]}"}; do
++      echo "  - $sf"
++    done
++  fi
+   echo "===================================================="
+   return 1
+ }
+@@ -2885,6 +3943,7 @@
+   echo "  kbd-timeout=$WITH_KBD_TIMEOUT"
+   echo "  bbr=$WITH_BBR browser-wayland=$WITH_BROWSER_WAYLAND"
+   echo "  usb-autosuspend=$WITH_USB_AUTOSUSPEND disable-ppd=$DISABLE_PPD"
++  echo "  mt7921e-aspm=$WITH_MT7921E_ASPM"
+   echo "  force-tlp-override=$FORCE_TLP_OVERRIDE"
+   echo "  skip-update=$SKIP_UPDATE full-upgrade=$WITH_FULL_UPGRADE"
+   echo ""
+@@ -2986,7 +4045,10 @@
+ fi
+ 
+ if [[ "$RESTORE_DEFAULTS" == true ]]; then
+-  restore_defaults
++  # v16 (change 5): honest exit code — 1 when a script-managed path could not
++  # be removed (restore_defaults lists them).
++  RESTORE_RC=0
++  restore_defaults || RESTORE_RC=$?
+   log_summary "$@"
+   # v15.3 (I-12): the closing banner is printed at the END of the output. v15.2
+   # printed it here — before hundreds of simulated "[DRY-RUN] -> Write file"
+@@ -2994,7 +4056,7 @@
+   if [[ "$DRY_RUN" == true ]]; then
+     echo "=== END DRY RUN — no files were modified. ==="
+   fi
+-  exit 0
++  exit "$RESTORE_RC"
+ fi
+ 
+ # ---- Power-management ownership report (v15.2) ------------------------------
+@@ -3435,7 +4497,7 @@
+ echo "== 10. Automated maintenance (${MAINTENANCE_SCHEDULE}) =="
+ atomic_write /usr/local/bin/system-maintenance.sh 0755 << 'MAINTENANCE_EOF'
+ #!/usr/bin/env bash
+-# Managed by vivobook_optimize.sh v15.3
++# Managed by vivobook_optimize.sh v16
+ set -Eeuo pipefail
+ 
+ exec 9>/run/system-maintenance.lock
+@@ -3554,7 +4616,7 @@
+ chmod 0755 /usr/local/bin/system-maintenance.sh
+ 
+ write_unit_file /etc/systemd/system/system-maintenance.service 0644 << 'EOF'
+-# Managed by vivobook_optimize.sh v15.3
++# Managed by vivobook_optimize.sh v16
+ [Unit]
+ Description=Automated System Maintenance and Updates
+ After=network-online.target
+@@ -3588,7 +4650,7 @@
+ fi
+ 
+ write_unit_file /etc/systemd/system/system-maintenance.timer 0644 << EOF
+-# Managed by vivobook_optimize.sh v15.3
++# Managed by vivobook_optimize.sh v16
+ [Unit]
+ Description=Run ${MAINTENANCE_SCHEDULE} system maintenance
+ 
+@@ -3626,6 +4688,14 @@
+ echo "   UID >= 1000 and a real login shell."
+ echo "   Check status any time: journalctl -u system-maintenance.service"
+ 
++# TODO(v16, needs user confirmation — deliberately NOT changed): the machine
++# facts (§18) say IPv6 is disabled via /etc/sysctl.d/99-vivobook.conf, but this
++# step writes only the four keys below and rewrites the whole file. If IPv6
++# lines were added to that file by hand, the first v16 run (header version
++# bump -> one-time rewrite) drops them. Check first with:
++#   grep -n ipv6 /etc/sysctl.d/99-vivobook.conf
++# and move such lines to an unmanaged file (e.g. /etc/sysctl.d/90-ipv6.conf).
++# IPv6 management is out of scope for v16.
+ echo "== 11. Kernel sysctl tuning (/etc/sysctl.d/99-vivobook.conf) =="
+ if [[ "$WITH_SYSCTL" == true ]]; then
+   ZRAM_SWAPPINESS=10
+@@ -3638,7 +4708,7 @@
+     ZRAM_SWAPPINESS=100
+   fi
+   atomic_write /etc/sysctl.d/99-vivobook.conf 0644 << EOF
+-# Managed by vivobook_optimize.sh v15.3 — safe, targeted desktop/laptop tuning.
++# Managed by vivobook_optimize.sh v16 — safe, targeted desktop/laptop tuning.
+ # Use --restore-defaults to remove this file, reset writeback, and reapply distro sysctls.
+ 
+ # 16GB RAM: prefer keeping the working set resident, but do NOT disable swap
+@@ -3718,14 +4788,14 @@
+ 
+     if [[ "$BBR_MODULE_OK" == true ]]; then
+       atomic_write /etc/modules-load.d/bbr.conf 0644 << 'BBR_MODULE_EOF'
+-# Managed by vivobook_optimize.sh v15.3 --with-bbr
++# Managed by vivobook_optimize.sh v16 --with-bbr
+ tcp_bbr
+ BBR_MODULE_EOF
+       chmod 0644 /etc/modules-load.d/bbr.conf
+     fi
+     if [[ "$BBR_SYSCTL_OK" == true ]]; then
+       atomic_write /etc/sysctl.d/98-network-bbr.conf 0644 << 'EOF'
+-# Managed by vivobook_optimize.sh v15.3 --with-bbr
++# Managed by vivobook_optimize.sh v16 --with-bbr
+ net.core.default_qdisc = fq
+ net.ipv4.tcp_congestion_control = bbr
+ EOF
+@@ -3762,14 +4832,22 @@
+        ! is_managed_file /etc/modprobe.d/audio-powersave.conf; then
+       echo "   NOTE: /etc/modprobe.d/audio-powersave.conf exists and is not script-managed;"
+       echo "   NOTE: it was preserved. Edit or remove it yourself if it is stale."
++    elif is_managed_file /etc/modprobe.d/audio-powersave.conf &&
++         ! audio_conf_is_legacy_content /etc/modprobe.d/audio-powersave.conf; then
++      # v16 (change 6): marked, but not the content step 12 writes (1/Y) —
++      # hand-edited or from an older release. Never delete it here.
++      echo "   NOTE: /etc/modprobe.d/audio-powersave.conf is script-marked but its options"
++      echo "   NOTE: ($(audio_staged_options)) differ from what this script writes; it was"
++      echo "   NOTE: preserved (treated as hand-edited). It applies at the next module load."
+     else
+       remove_managed_config /etc/modprobe.d/audio-powersave.conf
+     fi
+-    echo "   Intel SOF (snd_sof_pci_intel) is active — internal speakers/mics are"
+-    echo "   managed by SOF; snd_hda_intel power_save options are not forced."
++    echo "   Intel SOF (snd_sof_pci_intel) is active — step 12 stages no snd_hda_intel"
++    echo "   boot options here. snd_hda_intel may still expose power_save at runtime"
++    echo "   (live power_save=$(audio_hda_param power_save)); see the [HD Audio power save] status."
+   elif [[ -d /sys/module/snd_hda_intel ]] || modinfo snd_hda_intel &>/dev/null; then
+     atomic_write /etc/modprobe.d/audio-powersave.conf 0644 << 'EOF'
+-# Managed by vivobook_optimize.sh v15.3
++# Managed by vivobook_optimize.sh v16
+ # Idle the HDA codec after 1s of silence, and allow the controller to suspend.
+ # If you hear a click/pop on playback start, or the first ~0.5s of audio is
+ # clipped, set power_save=0 here (or delete this file) and reboot.
+@@ -3878,25 +4956,18 @@
+     else
+       echo "   No threshold service was installed; nothing to remove."
+     fi
+-    for b in /sys/class/power_supply/BAT*/charge_control_end_threshold; do
+-      [[ -w "$b" ]] || continue
+-      if [[ "$DRY_RUN" == true ]]; then
+-        echo "[DRY-RUN] Restore $b to 100"
+-      else
+-        { printf '%s\n' 100 > "$b"; } 2>/dev/null || true
+-      fi
+-    done
+-    echo "   Charge threshold reset to 100% for this session."
++    # v16 (change 13): counted live reset (see battery_limit_off_reset).
++    battery_limit_off_reset || true
+   else
+     atomic_write /etc/default/vivobook-battery 0644 <<EOF
+-# Managed by vivobook_optimize.sh v15.3 — consumed by set-battery-threshold.sh
++# Managed by vivobook_optimize.sh v16 — consumed by set-battery-threshold.sh
+ BATTERY_CHARGE_END_THRESHOLD=${BATTERY_LIMIT}
+ EOF
+     chmod 0644 /etc/default/vivobook-battery
+ 
+     atomic_write /usr/local/bin/set-battery-threshold.sh 0755 << 'BATTERY_EOF'
+ #!/usr/bin/env bash
+-# Managed by vivobook_optimize.sh v15.3
++# Managed by vivobook_optimize.sh v16
+ set -Eeuo pipefail
+ 
+ THRESH=80
+@@ -3938,7 +5009,7 @@
+ BATTERY_EOF
+ 
+     write_unit_file /etc/systemd/system/battery-charge-threshold.service 0644 << 'EOF'
+-# Managed by vivobook_optimize.sh v15.3
++# Managed by vivobook_optimize.sh v16
+ [Unit]
+ Description=Apply ASUS battery charge end threshold
+ After=basic.target
+@@ -3956,13 +5027,8 @@
+     # Sleep hook: the ASUS EC can reset the threshold to 100% on S0ix resume,
+     # and RemainAfterExit=true means the WantedBy=suspend.target dependency
+     # alone won't re-run the oneshot. Force a restart on 'post'.
+-    atomic_write /usr/lib/systemd/system-sleep/vivobook-battery 0755 << 'EOF'
+-#!/usr/bin/env bash
+-# Managed by vivobook_optimize.sh v15.3
+-if [[ "${1:-}" == post ]]; then
+-  systemctl restart battery-charge-threshold.service >/dev/null 2>&1 || true
+-fi
+-EOF
++    # v16 (change 7): shared guarded body (restart only while enabled).
++    atomic_write /usr/lib/systemd/system-sleep/vivobook-battery 0755 <<< "$(sleep_hook_body battery-charge-threshold.service)"
+     chmod 0755 /usr/lib/systemd/system-sleep/vivobook-battery
+ 
+     systemctl daemon-reload
+@@ -4023,14 +5089,14 @@
+     echo "   Nothing was configured."
+   else
+     atomic_write /etc/default/vivobook-thermal-profile 0644 <<EOF
+-# Managed by vivobook_optimize.sh v15.3
++# Managed by vivobook_optimize.sh v16
+ ASUS_THERMAL_PROFILE=${FAN_PROFILE}
+ EOF
+     chmod 0644 /etc/default/vivobook-thermal-profile
+ 
+     atomic_write /usr/local/bin/set-asus-thermal-profile.sh 0755 << 'THERMAL_EOF'
+ #!/usr/bin/env bash
+-# Managed by vivobook_optimize.sh v15.3
++# Managed by vivobook_optimize.sh v16
+ set -Eeuo pipefail
+ 
+ PROFILE=""
+@@ -4135,7 +5201,7 @@
+ THERMAL_EOF
+ 
+     write_unit_file /etc/systemd/system/asus-thermal-profile.service 0644 << 'EOF'
+-# Managed by vivobook_optimize.sh v15.3
++# Managed by vivobook_optimize.sh v16
+ [Unit]
+ Description=Apply ASUS ACPI thermal platform profile
+ After=basic.target
+@@ -4152,13 +5218,8 @@
+ WantedBy=multi-user.target
+ EOF
+ 
+-    atomic_write /usr/lib/systemd/system-sleep/vivobook-thermal-profile 0755 << 'EOF'
+-#!/usr/bin/env bash
+-# Managed by vivobook_optimize.sh v15.3
+-if [[ "${1:-}" == post ]]; then
+-  systemctl restart asus-thermal-profile.service >/dev/null 2>&1 || true
+-fi
+-EOF
++    # v16 (change 7): shared guarded body (restart only while enabled).
++    atomic_write /usr/lib/systemd/system-sleep/vivobook-thermal-profile 0755 <<< "$(sleep_hook_body asus-thermal-profile.service)"
+ 
+     systemctl daemon-reload
+     systemctl reenable asus-thermal-profile.service &>/dev/null ||
+@@ -4202,14 +5263,14 @@
+       echo "   intel_pstate is active, but no EPP nodes were found. Nothing configured."
+     else
+       atomic_write /etc/default/vivobook-epp 0644 <<EOF
+-# Managed by vivobook_optimize.sh v15.3
++# Managed by vivobook_optimize.sh v16
+ INTEL_EPP_PROFILE=${EPP_PROFILE}
+ EOF
+       chmod 0644 /etc/default/vivobook-epp
+ 
+       atomic_write /usr/local/bin/set-intel-epp.sh 0755 << 'EPP_EOF'
+ #!/usr/bin/env bash
+-# Managed by vivobook_optimize.sh v15.3
++# Managed by vivobook_optimize.sh v16
+ set -Eeuo pipefail
+ 
+ PROFILE=""
+@@ -4297,7 +5358,7 @@
+ EPP_EOF
+ 
+       write_unit_file /etc/systemd/system/intel-epp-profile.service 0644 << 'EOF'
+-# Managed by vivobook_optimize.sh v15.3
++# Managed by vivobook_optimize.sh v16
+ [Unit]
+ Description=Apply Intel P-State Energy Performance Preference
+ After=basic.target
+@@ -4313,13 +5374,8 @@
+ WantedBy=multi-user.target
+ EOF
+ 
+-      atomic_write /usr/lib/systemd/system-sleep/vivobook-intel-epp 0755 << 'EOF'
+-#!/usr/bin/env bash
+-# Managed by vivobook_optimize.sh v15.3
+-if [[ "${1:-}" == post ]]; then
+-  systemctl restart intel-epp-profile.service >/dev/null 2>&1 || true
+-fi
+-EOF
++      # v16 (change 7): shared guarded body (restart only while enabled).
++      atomic_write /usr/lib/systemd/system-sleep/vivobook-intel-epp 0755 <<< "$(sleep_hook_body intel-epp-profile.service)"
+ 
+       systemctl daemon-reload
+       systemctl reenable intel-epp-profile.service &>/dev/null ||
+@@ -4358,7 +5414,7 @@
+       fi
+ 
+       atomic_write /etc/default/vivobook-ppd-state 0644 << EOF
+-# Managed by vivobook_optimize.sh v15.3 --disable-ppd
++# Managed by vivobook_optimize.sh v16 --disable-ppd
+ PPD_WAS_PRESENT=true
+ PPD_WAS_ACTIVE=${PPD_ACTIVE}
+ PPD_WAS_ENABLED=${PPD_ENABLED}
+@@ -4377,12 +5433,42 @@
+   echo "   Skipped. Re-run with --disable-ppd to resolve potential desktop EPP overlaps."
+ fi
+ 
++echo "== 15d. Refresh existing managed sleep hooks (no create/enable/start) =="
++# v16 (change 7): the reference machine carries v15.3 hooks for units the
++# admin disabled (thermal/EPP); those hooks are only rewritten when their flag
++# is passed, and passing the flag would re-enable the unit. Refresh EXISTING
++# script-managed hooks in place: never create one, never touch an unmarked one,
++# never enable/start a unit. Content is compared first, so a second run (and
++# --dry-run, whose atomic_write prints unconditionally) shows no write.
++SLEEP_HOOKS_SEEN=0
++for SLEEP_PAIR in "${SLEEP_HOOK_PAIRS[@]}"; do
++  SLEEP_HOOK="$SLEEP_HOOK_DIR/${SLEEP_PAIR%%:*}"
++  SLEEP_UNIT="${SLEEP_PAIR#*:}"
++  [[ -e "$SLEEP_HOOK" ]] || continue
++  SLEEP_HOOKS_SEEN=$((SLEEP_HOOKS_SEEN + 1))
++  if ! is_managed_file "$SLEEP_HOOK"; then
++    echo "   $SLEEP_HOOK is not script-managed; left untouched."
++    continue
++  fi
++  SLEEP_WANT="$(sleep_hook_body "$SLEEP_UNIT")"
++  if [[ "$(cat "$SLEEP_HOOK" 2>/dev/null || true)" == "$SLEEP_WANT" ]]; then
++    echo "   $SLEEP_HOOK up to date."
++  else
++    atomic_write "$SLEEP_HOOK" 0755 <<< "$SLEEP_WANT"
++    chmod 0755 "$SLEEP_HOOK"
++    echo "   $SLEEP_HOOK refreshed (restart of $SLEEP_UNIT now guarded by is-enabled)."
++  fi
++done
++if (( SLEEP_HOOKS_SEEN == 0 )); then
++  echo "   No resume hooks installed; nothing to refresh (none are created here)."
++fi
++
+ echo "== 16. zRAM compressed in-memory swap =="
+ # v15.2: rerunning --with-zram against an already-correct zram must NOT
+ # swapoff/restart the populated device. Compare SEMANTICALLY (values, not
+ # file bytes) so a config written by a previous script version also matches;
+ # only a real difference triggers the disruptive reconfigure path.
+-ZRAM_DESIRED_CONF='# Managed by vivobook_optimize.sh v15.3 --with-zram
++ZRAM_DESIRED_CONF='# Managed by vivobook_optimize.sh v16 --with-zram
+ [zram0]
+ zram-size = min(ram / 2, 8192)
+ compression-algorithm = zstd
+@@ -4471,11 +5557,11 @@
+ (( IFACE_COUNT == 0 )) && echo "   No wireless interface detected on this run."
+ restore_iwlwifi_conf
+ echo "   No static wifi module options are staged by this step (upstream driver defaults"
+-echo "   kept). The MediaTek MT7902 ASPM workaround is managed separately in step 17a."
++echo "   kept). The optional MediaTek MT7902 ASPM fallback is handled separately in step 17a."
+ echo "   Wi-Fi power saving is controlled dynamically via 'iw dev <iface> set power_save'"
+ echo "   (AC off / battery on with --with-auto-power)."
+ 
+-echo "== 17a. MediaTek MT7902 (mt7921e) ASPM workaround (--with-mt7921e-aspm) =="
++echo "== 17a. MediaTek MT7902 (mt7921e) optional ASPM fallback (--with-mt7921e-aspm) =="
+ # Not TLP-gated on purpose: TLP does not manage /etc/modprobe.d/mt7921e.conf.
+ if [[ "$WITH_MT7921E_ASPM" == true ]]; then
+   if ! mt7921e_present; then
+@@ -4496,25 +5582,28 @@
+       echo "   NO-OP: $MT7921E_CONF is already managed and sets disable_aspm=1."
+     else
+       atomic_write "$MT7921E_CONF" 0644 << 'MT7921E_EOF'
+-# Managed by vivobook_optimize.sh v15.3 --with-mt7921e-aspm
+-# MediaTek MT7902 (mt7921e): the Vivobook X1605VA Wi-Fi is unstable with PCIe
+-# ASPM enabled (disconnects, packet loss). disable_aspm=1 keeps the link stable.
+-# Side effect: deep package idle is blocked, so PC8/PC10 stay at 0 — that is
+-# expected on this platform, not a fault to chase.
++# Managed by vivobook_optimize.sh v16 --with-mt7921e-aspm
++# MediaTek MT7902 (mt7921e): OPTIONAL fallback, staged on request. Use it only
++# if the Wi-Fi link is unstable on the running kernel. disable_aspm=1 blocks
++# PCIe L1.x on the Wi-Fi link; on the reference X1605VA it kept PC6/PC8/S0i3 at
++# 0 until it was removed on kernel 7.2.6 (Wi-Fi stable without it there).
++# Remove this file (or run --restore-defaults) once the link is stable without it.
+ # A REBOOT is required to apply (or: modprobe -r mt7921e && modprobe mt7921e).
+ options mt7921e disable_aspm=1
+ MT7921E_EOF
+       echo "   Wrote $MT7921E_CONF ('options mt7921e disable_aspm=1'). A REBOOT is required."
++      MT7921E_STAGED_THIS_RUN=true
+       echo "   No update-initramfs run: mt7921e is not part of the initramfs on this machine."
+     fi
+   fi
+ else
+-  echo "   Skipped. Re-run with --with-mt7921e-aspm to stage the MT7902 ASPM workaround."
++  echo "   Skipped (optional fallback; live disable_aspm=$(mt7921e_disable_aspm_live))."
++  echo "   Use --with-mt7921e-aspm only if the Wi-Fi link is unstable on your kernel."
+   if [[ -e "$MT7921E_CONF" ]]; then
+     if mt7921e_conf_has_disable_aspm; then
+-      echo "   (An existing $MT7921E_CONF already sets disable_aspm=1 and was left untouched.)"
++      echo "   (An existing $MT7921E_CONF sets disable_aspm=1 and was left untouched.)"
+     else
+-      echo "   (An existing $MT7921E_CONF does not set disable_aspm=1; Wi-Fi may be unstable.)"
++      echo "   (An existing $MT7921E_CONF has no disable_aspm=1 option: driver-default ASPM.)"
+     fi
+   fi
+ fi
+@@ -4531,7 +5620,7 @@
+     echo "   Your rule file was left untouched; no udev reload or re-trigger was issued."
+   else
+   atomic_write /etc/udev/rules.d/99-usb-autosuspend.rules 0644 << 'UDEV_USB_EOF'
+-# Managed by vivobook_optimize.sh v15.3 --with-usb-autosuspend
++# Managed by vivobook_optimize.sh v16 --with-usb-autosuspend
+ # Enable USB runtime autosuspend by default
+ ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{power/control}="auto"
+ 
+@@ -4629,7 +5718,7 @@
+   # Write the dynamic helper script
+   atomic_write /usr/local/bin/vivobook-power-switch.sh 0755 << 'POWER_SWITCH_EOF'
+ #!/usr/bin/env bash
+-# Managed by vivobook_optimize.sh v15.3 --with-auto-power
++# Managed by vivobook_optimize.sh v16 --with-auto-power
+ set -Eeuo pipefail
+ 
+ # Debounce: adapter connect/disconnect fires multiple power_supply udev events
+@@ -4761,9 +5850,10 @@
+ # It is unowned (no manager here claims it), unrecorded (no config file says
+ # what was written) and unrollbackable (--restore-defaults has no saved value
+ # to put back, and an operator may have chosen pcie_aspm.policy on the kernel
+-# cmdline). ASPM is precisely this platform's sensitive subsystem: the MT7902
+-# needs disable_aspm=1 for link stability, so silently rewriting the global
+-# policy is the one thing that must not happen automatically.
++# cmdline). ASPM is precisely this platform's sensitive subsystem: the MT7902's
++# behaviour is kernel-dependent (an optional per-device disable_aspm=1 fallback
++# exists) and ASPM gates S0ix, so silently rewriting the global policy is the
++# one thing that must not happen automatically.
+ 
+ apply_wifi_powersave() {
+   local val="$1" iface flags nodes=0 applied=0
+@@ -4802,11 +5892,12 @@
+ 
+ apply_audio_powersave() {
+   local val="$1" node=/sys/module/snd_hda_intel/parameters/power_save
+-  # v15.3 (I-25): when Intel SOF owns the internal audio (this machine)
+-  # snd_hda_intel may not be loaded at all, so the node does not exist. That is
+-  # 'unsupported', and the old code called it applied anyway.
++  # v15.3 (I-25): if snd_hda_intel is not loaded the node does not exist. That
++  # is 'unsupported', and the old code called it applied anyway.
++  # v16 (change 6): on the reference machine snd_hda_intel IS loaded alongside
++  # Intel SOF and exposes power_save, so this knob is normally applied there.
+   if [[ ! -e "$node" ]]; then
+-    KNOB_STATE[audio_powersave]="unsupported (snd_hda_intel power_save not exposed; Intel SOF path)"
++    KNOB_STATE[audio_powersave]="unsupported (snd_hda_intel power_save not exposed)"
+     return 0
+   fi
+   if [[ ! -w "$node" ]]; then
+@@ -4843,9 +5934,9 @@
+ 
+ # v15.3 (I-25): report every knob's real state in one line, and fail the unit
+ # only when something writable was present and every write to it was rejected.
+-echo "vivobook-power-switch v15.3: $POWER_LABEL — epp=${KNOB_STATE[epp]:-unknown} | thermal=${KNOB_STATE[thermal]:-unknown} | wifi_powersave=${KNOB_STATE[wifi_powersave]:-unknown} | audio_powersave=${KNOB_STATE[audio_powersave]:-unknown}"
++echo "vivobook-power-switch v16: $POWER_LABEL — epp=${KNOB_STATE[epp]:-unknown} | thermal=${KNOB_STATE[thermal]:-unknown} | wifi_powersave=${KNOB_STATE[wifi_powersave]:-unknown} | audio_powersave=${KNOB_STATE[audio_powersave]:-unknown}"
+ if [[ "$ANY_FAILED" == true && "$ANY_APPLIED" != true ]]; then
+-  echo "vivobook-power-switch v15.3: a writable control existed but every write to it failed." >&2
++  echo "vivobook-power-switch v16: a writable control existed but every write to it failed." >&2
+   exit 1
+ fi
+ POWER_SWITCH_EOF
+@@ -4853,7 +5944,7 @@
+ 
+   # Create udev rule with systemd integration
+   atomic_write /etc/udev/rules.d/99-vivobook-power.rules 0644 << 'UDEV_EOF'
+-# Managed by vivobook_optimize.sh v15.3 --with-auto-power
++# Managed by vivobook_optimize.sh v16 --with-auto-power
+ # SYSTEMD_WANTS alone does not restart an already-active oneshot service.
+ # Queue a nonblocking restart on every adapter change; run tuning in systemd,
+ # never a long-running helper inside the udev worker.
+@@ -4862,9 +5953,9 @@
+ 
+   # Create systemd boot-time oneshot service
+   write_unit_file /etc/systemd/system/vivobook-power-switch.service 0644 << 'EOF'
+-# Managed by vivobook_optimize.sh v15.3
++# Managed by vivobook_optimize.sh v16
+ [Unit]
+-Description=Set ASUS Vivobook v15.3 AC/battery power profile
++Description=Set ASUS Vivobook v16 AC/battery power profile
+ After=basic.target asus-thermal-profile.service intel-epp-profile.service rapl-power-limits.service
+ After=NetworkManager.service systemd-sysctl.service
+ # v15.3 (I-05): ordering only, no Wants= (ignored when PPD is absent).
+@@ -4894,8 +5985,8 @@
+     echo "   Profiles apply via power-profiles-daemon when active; PPD then also owns"
+     echo "   the platform profile (direct sysfs thermal writes are skipped in that case)."
+     echo "   Without PPD, profiles apply via sysfs directly. Audio power_save: 0 (AC) / 1 (battery)"
+-    echo "   where snd_hda_intel exposes it — on this machine Intel SOF owns the internal"
+-    echo "   audio, so that knob is normally unsupported and is reported as such."
++    echo "   where snd_hda_intel exposes it — on the reference machine it is exposed alongside"
++    echo "   Intel SOF; the helper reports applied/unsupported per run."
+     echo "   The helper prints a per-knob state line (applied / unsupported / failed) and only"
+     echo "   fails when a writable control existed and every write to it was rejected."
+     echo "   No CPU/iGPU frequency clamps, RAPL overrides, backlight changes, or writeback changes."
+@@ -5051,7 +6142,7 @@
+     # value for it is NEVER invented (not from defaults, not from the live
+     # value, not from a guess).
+     atomic_write /etc/default/vivobook-rapl 0644 << EOF
+-# Managed by vivobook_optimize.sh v15.3
++# Managed by vivobook_optimize.sh v16
+ # PL1/PL2 in watts. An EMPTY value means: leave that constraint under
+ # firmware control — it is not written by the boot service.
+ PL1=${PL1:-}
+@@ -5061,7 +6152,7 @@
+ 
+     atomic_write /usr/local/bin/set-rapl-limits.sh 0755 << 'RAPL_EOF'
+ #!/usr/bin/env bash
+-# Managed by vivobook_optimize.sh v15.3
++# Managed by vivobook_optimize.sh v16
+ set -Eeuo pipefail
+ 
+ CONFIG="/etc/default/vivobook-rapl"
+@@ -5146,7 +6237,7 @@
+     chmod 0755 /usr/local/bin/set-rapl-limits.sh
+ 
+     write_unit_file /etc/systemd/system/rapl-power-limits.service 0644 << 'EOF'
+-# Managed by vivobook_optimize.sh v15.3
++# Managed by vivobook_optimize.sh v16
+ [Unit]
+ Description=Set Intel RAPL power limits (PL1/PL2)
+ After=basic.target
+@@ -5229,7 +6320,7 @@
+     # Write helper script
+     atomic_write /usr/local/bin/vivobook-kbd-timeout.sh 0755 << 'KBD_EOF'
+ #!/usr/bin/env bash
+-# Managed by vivobook_optimize.sh v15.3 --with-kbd-timeout
++# Managed by vivobook_optimize.sh v16 --with-kbd-timeout
+ set -Eeuo pipefail
+ 
+ KBD_LED=/sys/class/leds/asus::kbd_backlight
+@@ -5253,18 +6344,13 @@
+ KBD_EOF
+     chmod 0755 /usr/local/bin/vivobook-kbd-timeout.sh
+ 
+-    atomic_write /usr/lib/systemd/system-sleep/vivobook-kbd-timeout 0755 << 'EOF'
+-#!/usr/bin/env bash
+-# Managed by vivobook_optimize.sh v15.3
+-if [[ "${1:-}" == post ]]; then
+-  systemctl restart vivobook-kbd-timeout.service >/dev/null 2>&1 || true
+-fi
+-EOF
++    # v16 (change 7): shared guarded body (restart only while enabled).
++    atomic_write /usr/lib/systemd/system-sleep/vivobook-kbd-timeout 0755 <<< "$(sleep_hook_body vivobook-kbd-timeout.service)"
+     chmod 0755 /usr/lib/systemd/system-sleep/vivobook-kbd-timeout
+ 
+     # Create systemd service
+     write_unit_file /etc/systemd/system/vivobook-kbd-timeout.service 0644 << 'EOF'
+-# Managed by vivobook_optimize.sh v15.3
++# Managed by vivobook_optimize.sh v16
+ [Unit]
+ Description=Set keyboard backlight inactivity timeout (30s)
+ After=basic.target
+@@ -5303,7 +6389,7 @@
+ 
+ echo ""
+ echo "===================================================="
+-echo "Done — ASUS Vivobook Optimization Pass v15.3."
++echo "Done — ASUS Vivobook Optimization Pass v16."
+ echo "Flags this run:"
+ echo "  guc=$WITH_GUC"
+ echo "  auto-upgrade=$WITH_AUTO_UPGRADE maintenance-schedule=$MAINTENANCE_SCHEDULE"
+@@ -5315,6 +6401,7 @@
+ echo "  kbd-timeout=$WITH_KBD_TIMEOUT"
+ echo "  bbr=$WITH_BBR browser-wayland=$WITH_BROWSER_WAYLAND"
+ echo "  usb-autosuspend=$WITH_USB_AUTOSUSPEND disable-ppd=$DISABLE_PPD"
++echo "  mt7921e-aspm=$WITH_MT7921E_ASPM"
+ echo "  force-tlp-override=$FORCE_TLP_OVERRIDE"
+ echo "  dry-run=$DRY_RUN"
+ echo "  skip-update=$SKIP_UPDATE full-upgrade=$WITH_FULL_UPGRADE"
+@@ -5327,11 +6414,15 @@
+ fi
+ 
+ echo "Also reboot to apply: CPU microcode (if its version changed this run);"
+-echo "snd_hda_intel power_save — only when the legacy HDA path is active, because this"
+-echo "machine uses Intel SOF where step 12 stages nothing; the mt7921e ASPM workaround"
+-echo "if --with-mt7921e-aspm staged it this run; unloading of module parameters staged"
+-echo "by earlier script versions (i915/iwlwifi, if any); and staged fwupd firmware"
+-echo "updates (if --with-auto-upgrade applied any)."
++echo "staged snd_hda_intel boot options (audio-powersave.conf) — they apply only at the"
++echo "next module load (step 12 writes the file only on the legacy HDA path; with Intel"
++echo "SOF it stages nothing); unloading of module parameters staged by earlier script"
++echo "versions (i915/iwlwifi, if any); and staged fwupd firmware updates (if"
++echo "--with-auto-upgrade applied any)."
++if [[ "$MT7921E_STAGED_THIS_RUN" == true ]]; then
++  echo "The optional mt7921e disable_aspm=1 fallback was staged THIS run: it applies"
++  echo "after a reboot and blocks PCIe L1.x on the Wi-Fi link (deep C-states / S0i3)."
++fi
+ echo "thermald, VA-API packages, fstrim.timer, sysctl tuning, battery threshold,"
+ echo "thermal profile, EPP, zRAM, dynamic power switching, RAPL limits, keyboard"
+ echo "backlight timeout, and the maintenance timer are active now when requested"
+@@ -5344,9 +6435,9 @@
+ echo "  systemctl list-timers"
+ echo "  journalctl -u system-maintenance.service"
+ echo "  sysctl vm.swappiness fs.inotify.max_user_watches kernel.nmi_watchdog vm.dirty_writeback_centisecs"
+-echo "  cat /sys/module/snd_hda_intel/parameters/power_save   # legacy HDA only; SOF here"
++echo "  cat /sys/module/snd_hda_intel/parameters/power_save   # live value; exposed alongside SOF here"
+ echo "  cat /sys/module/mt7921e/parameters/disable_aspm"
+-echo "  sudo bash $SCRIPT_PATH --safe-mode-check              # boot/Wi-Fi integrity gate"
++echo "  sudo bash $SCRIPT_PATH --safe-mode-check              # boot-integrity gate (Wi-Fi item informational)"
+ echo "  cat /sys/class/power_supply/BAT*/charge_control_end_threshold"
+ echo "  systemctl status battery-charge-threshold.service"
+ echo "  cat /sys/firmware/acpi/platform_profile"

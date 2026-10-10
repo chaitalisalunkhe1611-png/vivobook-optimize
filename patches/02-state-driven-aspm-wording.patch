@@ -1,0 +1,244 @@
+--- a/vivobook_optimize_v16.sh
++++ b/vivobook_optimize_v16.sh
+@@ -60,12 +60,15 @@
+ #   sudo bash __SCRIPT_NAME__ --with-bbr                         enable TCP BBR congestion control + FQ qdisc
+ #   sudo bash __SCRIPT_NAME__ --with-browser-wayland               configure Ozone platform auto-detection for Wayland browsers
+ #                                                                (--with-browser-vaapi remains a compatibility alias)
+-#   sudo bash __SCRIPT_NAME__ --with-mt7921e-aspm                stage the MediaTek MT7902 (mt7921e) ASPM workaround:
+-#                                                                /etc/modprobe.d/mt7921e.conf with
+-#                                                                'options mt7921e disable_aspm=1'. Required for Wi-Fi
+-#                                                                link stability on this platform; needs a reboot (no
+-#                                                                initramfs rebuild). Unmanaged files are never
+-#                                                                overwritten. Not gated by TLP.
++#   sudo bash __SCRIPT_NAME__ --with-mt7921e-aspm                OPTIONAL fallback: stage the MediaTek MT7902 (mt7921e)
++#                                                                ASPM workaround /etc/modprobe.d/mt7921e.conf with
++#                                                                'options mt7921e disable_aspm=1'. Use it only if the
++#                                                                Wi-Fi link is actually unstable on your kernel. It
++#                                                                blocks PCIe L1.x on the Wi-Fi link; on the reference
++#                                                                machine it kept PC6/PC8/S0i3 at 0 until it was removed
++#                                                                on kernel 7.2.6 (Wi-Fi stable without it). Needs a
++#                                                                reboot (no initramfs rebuild). Unmanaged files are
++#                                                                never overwritten. Not gated by TLP.
+ #   sudo bash __SCRIPT_NAME__ --with-usb-autosuspend             enable USB runtime autosuspend (exempting USB HID,
+ #                                                                Bluetooth/wireless controllers, USB audio class 01
+ #                                                                and UVC video class 0e)
+@@ -173,6 +176,8 @@
+ SAFE_MODE_CHECK=false
+ # v15.2: even with this set, --with-auto-power still refuses to run under TLP.
+ FORCE_TLP_OVERRIDE=false
++# v16 (change 2): set by step 17a only when it actually staged mt7921e.conf.
++MT7921E_STAGED_THIS_RUN=false
+ 
+ MANAGED_BROWSER_FLAGS=(
+   "--ozone-platform-hint=auto"
+@@ -529,8 +534,19 @@
+   printf '%s\n' "${v:-unavailable}"
+ }
+ 
+-# The mt7921e ASPM workaround is what keeps PC8/PC10 at zero on this platform
+-# (I-22), whether it comes from the live module parameter or the staged file.
++# v16 (change 2): these helpers describe what is CONFIGURED / LIVE — they do not
++# imply the workaround is required. "active" = live parameter set OR staged in
++# the config (v15.3 semantics, kept for the JSON key of the same name); "live" =
++# the running module actually has disable_aspm set. While it is live, PCIe L1.x
++# is blocked on the Wi-Fi link (on this machine that kept PC6/PC8/S0i3 at 0
++# before kernel 7.2.6).
++aspm_workaround_live() {
++  case "$(mt7921e_disable_aspm_live)" in
++    Y|y|1) return 0 ;;
++  esac
++  return 1
++}
++
+ aspm_workaround_active() {
+   local live
+   live="$(mt7921e_disable_aspm_live)"
+@@ -1141,15 +1157,14 @@
+   remove_managed_config /etc/modules-load.d/bbr.conf
+   remove_managed_config /etc/modprobe.d/audio-powersave.conf
+ 
+-  # v15.3 (I-03): the MediaTek MT7902 needs 'options mt7921e disable_aspm=1'
+-  # for link stability on this platform. Removing it is the documented
+-  # rollback, but it re-exposes Wi-Fi to the disconnects/packet loss the
+-  # workaround exists to prevent — so say so loudly.
++  # v16 (change 2): the disable_aspm=1 workaround is an OPTIONAL fallback. On
++  # the reference machine (kernel 7.2.6) Wi-Fi is stable without it and it was
++  # what blocked PC6/PC8/S0i3. Say what removing it does, not that it is required.
+   if is_managed_file "$MT7921E_CONF"; then
+-    echo "   WARNING: removing $MT7921E_CONF (mt7921e disable_aspm=1)." >&2
+-    echo "   WARNING: Wi-Fi link stability on the MT7902 REQUIRES this workaround on this" >&2
+-    echo "   WARNING: platform. Expect disconnects and packet loss until it is restored with" >&2
+-    echo "   WARNING:   sudo bash $SCRIPT_PATH --with-mt7921e-aspm" >&2
++    echo "   NOTE: removing the script-managed $MT7921E_CONF (mt7921e disable_aspm=1)."
++    echo "   NOTE: Wi-Fi ASPM returns to the driver default at the next module load/reboot."
++    echo "   NOTE: Re-stage it only if the Wi-Fi link becomes unstable on your kernel:"
++    echo "   NOTE:   sudo bash $SCRIPT_PATH --with-mt7921e-aspm"
+   fi
+   remove_managed_config "$MT7921E_CONF"
+ 
+@@ -1644,11 +1659,14 @@
+       echo "  Deep C-states:     PC10 reached (deep package idle is working)"
+     elif [[ -n "$pc8" && "$pc8" != "0" ]]; then
+       echo "  Deep C-states:     PC8 reached, PC10 never entered (check ASPM/USB/audio wakeups)"
++    elif aspm_workaround_live; then
++      echo "  Deep C-states:     neither PC8 nor PC10 reached — consistent with the LIVE"
++      echo "                     mt7921e disable_aspm=1 fallback, which blocks PCIe L1.x on"
++      echo "                     the Wi-Fi link (on this machine it kept PC6/PC8/S0i3 at 0"
++      echo "                     before kernel 7.2.6). Remove it if Wi-Fi is stable without it."
+     elif aspm_workaround_active; then
+-      echo "  Deep C-states:     neither PC8 nor PC10 reached — EXPECTED: the mt7921e"
+-      echo "                     ASPM workaround (disable_aspm=1) blocks the deep package"
+-      echo "                     idle paths on this platform. Not a fault; do not chase"
+-      echo "                     ASPM here."
++      echo "  Deep C-states:     neither PC8 nor PC10 reached. disable_aspm=1 is staged in"
++      echo "                     $MT7921E_CONF but NOT live, so it is not the cause in this boot."
+     else
+       echo "  Deep C-states:     neither PC8 nor PC10 reached since boot"
+     fi
+@@ -1904,10 +1922,15 @@
+   else
+     echo "  Config:                $MT7921E_CONF absent"
+   fi
+-  if aspm_workaround_active; then
+-    echo "  ASPM workaround:       active — PC8/PC10 absence is expected (not a fault)"
++  # v16 (change 2): state-driven — live vs staged vs not configured.
++  if aspm_workaround_live; then
++    echo "  ASPM workaround:       LIVE (disable_aspm=Y) — PCIe L1.x blocked on the Wi-Fi link;"
++    echo "                         deep package C-states / S0i3 are limited while it is live"
++  elif aspm_workaround_active; then
++    echo "  ASPM workaround:       staged in config, not live (applies at next module load/reboot)"
+   else
+-    echo "  ASPM workaround:       not active — Wi-Fi may be unstable on this platform"
++    echo "  ASPM workaround:       not configured — driver-default ASPM (live disable_aspm=$(mt7921e_disable_aspm_live));"
++    echo "                         optional fallback: --with-mt7921e-aspm, only if the link is unstable"
+   fi
+ 
+   echo
+@@ -2258,8 +2281,8 @@
+   local aspm_wa=false deep_expected=false
+   if aspm_workaround_active; then
+     aspm_wa=true
+-    # v15.3 (I-22): PC8/PC10 == 0 is the documented consequence of
+-    # disable_aspm=1 on this platform, not a fault to chase.
++    # v15.3 (I-22) semantics kept for this key: no deep PC state while the
++    # workaround is live or staged. v16: see aspm_workaround_live for "live".
+     [[ "$deep_ok" == false ]] && deep_expected=true
+   fi
+   echo "    \"pmc_core_available\": $pmc_avail,"
+@@ -2267,6 +2290,7 @@
+   echo "    \"pc10_residency\": $pc10_j,"
+   echo "    \"deep_pc_states_reached\": $deep_ok,"
+   echo "    \"aspm_workaround_active\": $aspm_wa,"
++  echo "    \"aspm_workaround_live\": $(aspm_workaround_live && echo true || echo false),"
+   echo "    \"deep_pc_states_expected_absent\": $deep_expected,"
+   echo "    \"slp_s0_residency_usec\": $slp_s0_j,"
+   echo "    \"cpuidle_driver\": $(json_string "$(status_value /sys/devices/system/cpu/cpuidle/current_driver)")"
+@@ -2470,14 +2494,16 @@
+   echo ""
+   echo "    ],"
+   echo "    \"legacy_iwlwifi_config_present\": $( [[ -f /etc/modprobe.d/iwlwifi.conf ]] && echo true || echo false ),"
+-  # v15.3 (I-03): mt7921e ASPM workaround state.
++  # v15.3 (I-03): mt7921e ASPM workaround state. v16: aspm_workaround_live is
++  # true only when the running module has disable_aspm set (Y/1).
+   echo "    \"mt7921e\": {"
+   echo "      \"in_use\": $(mt7921e_present && echo true || echo false),"
+   echo "      \"config_present\": $( [[ -f "$MT7921E_CONF" ]] && echo true || echo false ),"
+   echo "      \"managed\": $(mt7921e_conf_managed && echo true || echo false),"
+   echo "      \"disable_aspm_1\": $(mt7921e_conf_has_disable_aspm && echo true || echo false),"
+   echo "      \"disable_aspm_live\": $(json_string "$(mt7921e_disable_aspm_live)"),"
+-  echo "      \"aspm_workaround_active\": $(aspm_workaround_active && echo true || echo false)"
++  echo "      \"aspm_workaround_active\": $(aspm_workaround_active && echo true || echo false),"
++  echo "      \"aspm_workaround_live\": $(aspm_workaround_live && echo true || echo false)"
+   echo "    }"
+   echo "  },"
+   echo "  \"timers\": {"
+@@ -4550,11 +4576,11 @@
+ (( IFACE_COUNT == 0 )) && echo "   No wireless interface detected on this run."
+ restore_iwlwifi_conf
+ echo "   No static wifi module options are staged by this step (upstream driver defaults"
+-echo "   kept). The MediaTek MT7902 ASPM workaround is managed separately in step 17a."
++echo "   kept). The optional MediaTek MT7902 ASPM fallback is handled separately in step 17a."
+ echo "   Wi-Fi power saving is controlled dynamically via 'iw dev <iface> set power_save'"
+ echo "   (AC off / battery on with --with-auto-power)."
+ 
+-echo "== 17a. MediaTek MT7902 (mt7921e) ASPM workaround (--with-mt7921e-aspm) =="
++echo "== 17a. MediaTek MT7902 (mt7921e) optional ASPM fallback (--with-mt7921e-aspm) =="
+ # Not TLP-gated on purpose: TLP does not manage /etc/modprobe.d/mt7921e.conf.
+ if [[ "$WITH_MT7921E_ASPM" == true ]]; then
+   if ! mt7921e_present; then
+@@ -4576,24 +4602,27 @@
+     else
+       atomic_write "$MT7921E_CONF" 0644 << 'MT7921E_EOF'
+ # Managed by vivobook_optimize.sh v15.3 --with-mt7921e-aspm
+-# MediaTek MT7902 (mt7921e): the Vivobook X1605VA Wi-Fi is unstable with PCIe
+-# ASPM enabled (disconnects, packet loss). disable_aspm=1 keeps the link stable.
+-# Side effect: deep package idle is blocked, so PC8/PC10 stay at 0 — that is
+-# expected on this platform, not a fault to chase.
++# MediaTek MT7902 (mt7921e): OPTIONAL fallback, staged on request. Use it only
++# if the Wi-Fi link is unstable on the running kernel. disable_aspm=1 blocks
++# PCIe L1.x on the Wi-Fi link; on the reference X1605VA it kept PC6/PC8/S0i3 at
++# 0 until it was removed on kernel 7.2.6 (Wi-Fi stable without it there).
++# Remove this file (or run --restore-defaults) once the link is stable without it.
+ # A REBOOT is required to apply (or: modprobe -r mt7921e && modprobe mt7921e).
+ options mt7921e disable_aspm=1
+ MT7921E_EOF
+       echo "   Wrote $MT7921E_CONF ('options mt7921e disable_aspm=1'). A REBOOT is required."
++      MT7921E_STAGED_THIS_RUN=true
+       echo "   No update-initramfs run: mt7921e is not part of the initramfs on this machine."
+     fi
+   fi
+ else
+-  echo "   Skipped. Re-run with --with-mt7921e-aspm to stage the MT7902 ASPM workaround."
++  echo "   Skipped (optional fallback; live disable_aspm=$(mt7921e_disable_aspm_live))."
++  echo "   Use --with-mt7921e-aspm only if the Wi-Fi link is unstable on your kernel."
+   if [[ -e "$MT7921E_CONF" ]]; then
+     if mt7921e_conf_has_disable_aspm; then
+-      echo "   (An existing $MT7921E_CONF already sets disable_aspm=1 and was left untouched.)"
++      echo "   (An existing $MT7921E_CONF sets disable_aspm=1 and was left untouched.)"
+     else
+-      echo "   (An existing $MT7921E_CONF does not set disable_aspm=1; Wi-Fi may be unstable.)"
++      echo "   (An existing $MT7921E_CONF has no disable_aspm=1 option: driver-default ASPM.)"
+     fi
+   fi
+ fi
+@@ -4840,9 +4869,10 @@
+ # It is unowned (no manager here claims it), unrecorded (no config file says
+ # what was written) and unrollbackable (--restore-defaults has no saved value
+ # to put back, and an operator may have chosen pcie_aspm.policy on the kernel
+-# cmdline). ASPM is precisely this platform's sensitive subsystem: the MT7902
+-# needs disable_aspm=1 for link stability, so silently rewriting the global
+-# policy is the one thing that must not happen automatically.
++# cmdline). ASPM is precisely this platform's sensitive subsystem: the MT7902's
++# behaviour is kernel-dependent (an optional per-device disable_aspm=1 fallback
++# exists) and ASPM gates S0ix, so silently rewriting the global policy is the
++# one thing that must not happen automatically.
+ 
+ apply_wifi_powersave() {
+   local val="$1" iface flags nodes=0 applied=0
+@@ -5407,10 +5437,13 @@
+ 
+ echo "Also reboot to apply: CPU microcode (if its version changed this run);"
+ echo "snd_hda_intel power_save — only when the legacy HDA path is active, because this"
+-echo "machine uses Intel SOF where step 12 stages nothing; the mt7921e ASPM workaround"
+-echo "if --with-mt7921e-aspm staged it this run; unloading of module parameters staged"
+-echo "by earlier script versions (i915/iwlwifi, if any); and staged fwupd firmware"
+-echo "updates (if --with-auto-upgrade applied any)."
++echo "machine uses Intel SOF where step 12 stages nothing; unloading of module"
++echo "parameters staged by earlier script versions (i915/iwlwifi, if any); and staged"
++echo "fwupd firmware updates (if --with-auto-upgrade applied any)."
++if [[ "$MT7921E_STAGED_THIS_RUN" == true ]]; then
++  echo "The optional mt7921e disable_aspm=1 fallback was staged THIS run: it applies"
++  echo "after a reboot and blocks PCIe L1.x on the Wi-Fi link (deep C-states / S0i3)."
++fi
+ echo "thermald, VA-API packages, fstrim.timer, sysctl tuning, battery threshold,"
+ echo "thermal profile, EPP, zRAM, dynamic power switching, RAPL limits, keyboard"
+ echo "backlight timeout, and the maintenance timer are active now when requested"
+@@ -5425,7 +5458,7 @@
+ echo "  sysctl vm.swappiness fs.inotify.max_user_watches kernel.nmi_watchdog vm.dirty_writeback_centisecs"
+ echo "  cat /sys/module/snd_hda_intel/parameters/power_save   # legacy HDA only; SOF here"
+ echo "  cat /sys/module/mt7921e/parameters/disable_aspm"
+-echo "  sudo bash $SCRIPT_PATH --safe-mode-check              # boot/Wi-Fi integrity gate"
++echo "  sudo bash $SCRIPT_PATH --safe-mode-check              # boot-integrity gate (Wi-Fi item informational)"
+ echo "  cat /sys/class/power_supply/BAT*/charge_control_end_threshold"
+ echo "  systemctl status battery-charge-threshold.service"
+ echo "  cat /sys/firmware/acpi/platform_profile"

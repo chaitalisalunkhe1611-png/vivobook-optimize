@@ -1,0 +1,79 @@
+--- a/vivobook_optimize_v16.sh
++++ b/vivobook_optimize_v16.sh
+@@ -1244,6 +1244,58 @@
+   done < <(sysctl_effective_files)
+ }
+ 
++# ---- v16 (change 13): --battery-limit=off live reset, counted ---------------
++# v15.3 printed "Charge threshold reset to 100%" even when no attribute existed
++# or every write failed. Count what actually happened instead.
++battery_limit_off_reset() {
++  local b cur total=0 set_ok=0 already=0 failed=0
++  for b in /sys/class/power_supply/BAT*/charge_control_end_threshold; do
++    [[ -e "$b" ]] || continue
++    total=$((total + 1))
++    cur="$(cat "$b" 2>/dev/null || true)"
++    cur="${cur//[[:space:]]/}"
++    if [[ "$cur" == 100 ]]; then
++      already=$((already + 1))
++      continue
++    fi
++    if [[ ! -w "$b" ]]; then
++      failed=$((failed + 1))
++      continue
++    fi
++    if [[ "$DRY_RUN" == true ]]; then
++      echo "[DRY-RUN] Restore $b to 100 (currently ${cur:-unknown})"
++      set_ok=$((set_ok + 1))
++    elif { printf '%s\n' 100 > "$b"; } 2>/dev/null; then
++      set_ok=$((set_ok + 1))
++    else
++      failed=$((failed + 1))
++    fi
++  done
++  if (( total == 0 )); then
++    echo "   No charge_control_end_threshold attribute found; nothing to reset."
++    return 0
++  fi
++  if (( set_ok > 0 )); then
++    if [[ "$DRY_RUN" == true ]]; then
++      echo "   Charge threshold would be set to 100% on $set_ok of $total battery attribute(s)."
++    else
++      echo "   Charge threshold set to 100% on $set_ok of $total battery attribute(s) for this session."
++    fi
++  fi
++  if (( already > 0 )); then
++    if (( already == total )); then
++      echo "   Charge threshold already 100% on all $total battery attribute(s); nothing to change."
++    else
++      echo "   Charge threshold already 100% on $already of $total battery attribute(s)."
++    fi
++  fi
++  if (( failed > 0 )); then
++    echo "WARNING: could not reset the charge threshold to 100% on $failed of $total battery attribute(s)." >&2
++    return 1
++  fi
++  return 0
++}
++
+ remove_i915_conf() {
+   [[ -e "$I915_CONF" ]] || return 0
+   if grep -q "Managed by vivobook_optimize" "$I915_CONF" 2>/dev/null ||
+@@ -4827,15 +4879,8 @@
+     else
+       echo "   No threshold service was installed; nothing to remove."
+     fi
+-    for b in /sys/class/power_supply/BAT*/charge_control_end_threshold; do
+-      [[ -w "$b" ]] || continue
+-      if [[ "$DRY_RUN" == true ]]; then
+-        echo "[DRY-RUN] Restore $b to 100"
+-      else
+-        { printf '%s\n' 100 > "$b"; } 2>/dev/null || true
+-      fi
+-    done
+-    echo "   Charge threshold reset to 100% for this session."
++    # v16 (change 13): counted live reset (see battery_limit_off_reset).
++    battery_limit_off_reset || true
+   else
+     atomic_write /etc/default/vivobook-battery 0644 <<EOF
+ # Managed by vivobook_optimize.sh v16 — consumed by set-battery-threshold.sh

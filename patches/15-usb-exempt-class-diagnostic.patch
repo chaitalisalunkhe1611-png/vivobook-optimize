@@ -1,0 +1,101 @@
+--- a/vivobook_optimize_v16.sh
++++ b/vivobook_optimize_v16.sh
+@@ -1296,6 +1296,41 @@
+   return 0
+ }
+ 
++# ---- v16 (change 15): USB exempt-class diagnostic (read-only) ---------------
++# The --with-usb-autosuspend rule sets power/control=on for devices with an
++# interface of class 03 (HID), e0 (wireless/BT), 01 (audio) or 0e (video).
++# On the reference machine the webcam (1-9) and Bluetooth (1-10) still read
++# "auto". This only REPORTS; the rule itself is unchanged.
++USB_EXEMPT_CLASSES="03 e0 01 0e"
++
++# Rows "<device>\t<classes>\t<power/control>\t<product>" (non-empty fields).
++usb_exempt_class_rows() {
++  local intf cls dev name
++  local -A dev_classes=()
++  for intf in /sys/bus/usb/devices/*:*; do
++    [[ -r "$intf/bInterfaceClass" ]] || continue
++    cls="$(cat "$intf/bInterfaceClass" 2>/dev/null || true)"
++    cls="${cls,,}"
++    case " $USB_EXEMPT_CLASSES " in
++      *" $cls "*) ;;
++      *) continue ;;
++    esac
++    name="${intf##*/}"
++    dev="${name%%:*}"
++    case ",${dev_classes[$dev]:-}," in
++      *",$cls,"*) ;;
++      *) dev_classes[$dev]="${dev_classes[$dev]:+${dev_classes[$dev]},}$cls" ;;
++    esac
++  done
++  (( ${#dev_classes[@]} > 0 )) || return 0
++  for dev in $(printf '%s\n' "${!dev_classes[@]}" | sort -V); do
++    local ctl prod
++    ctl="$(cat "/sys/bus/usb/devices/$dev/power/control" 2>/dev/null || true)"
++    prod="$(cat "/sys/bus/usb/devices/$dev/product" 2>/dev/null || true)"
++    printf '%s\t%s\t%s\t%s\n' "$dev" "${dev_classes[$dev]}" "${ctl:-unknown}" "${prod:-unknown}"
++  done
++}
++
+ remove_i915_conf() {
+   [[ -e "$I915_CONF" ]] || return 0
+   if grep -q "Managed by vivobook_optimize" "$I915_CONF" 2>/dev/null ||
+@@ -2518,6 +2553,31 @@
+   else
+     echo "  Managed udev rule: absent"
+   fi
++  # v16 (change 15): read-only check of devices the rule exempts.
++  local ux_rows ux_dev ux_cls ux_ctl ux_prod ux_applicable=false ux_mismatch=0
++  is_managed_file /etc/udev/rules.d/99-usb-autosuspend.rules && ux_applicable=true
++  ux_rows="$(usb_exempt_class_rows)"
++  if [[ -n "$ux_rows" ]]; then
++    echo "  Exempt-class devices (interface class 03/e0/01/0e):"
++    while IFS=$'\t' read -r ux_dev ux_cls ux_ctl ux_prod; do
++      [[ -n "$ux_dev" ]] || continue
++      if [[ "$ux_ctl" == auto && "$ux_applicable" == true ]]; then
++        printf '    %-8s class %-8s power/control=%-5s MISMATCH (%s)\n' "$ux_dev" "$ux_cls" "$ux_ctl" "$ux_prod"
++        ux_mismatch=$((ux_mismatch + 1))
++      else
++        printf '    %-8s class %-8s power/control=%-5s (%s)\n' "$ux_dev" "$ux_cls" "$ux_ctl" "$ux_prod"
++      fi
++    done <<< "$ux_rows"
++    if (( ux_mismatch > 0 )); then
++      echo "  MISMATCH: the managed rule should hold these at 'on'. Something set 'auto' after"
++      echo "  the rule ran (e.g. btusb enable_autosuspend, powertop --auto-tune, or another"
++      echo "  rule). Report only — nothing was changed."
++    elif [[ "$ux_applicable" != true ]]; then
++      echo "  (Informational: the managed rule is not installed, so 'auto' is not a mismatch.)"
++    fi
++  else
++    echo "  Exempt-class devices: none found"
++  fi
+ 
+   echo
+   echo "[power-profiles-daemon Conflict State]"
+@@ -3222,7 +3282,23 @@
+   echo "  \"usb_autosuspend\": {"
+   local usb_rule=false
+   [[ -f /etc/udev/rules.d/99-usb-autosuspend.rules ]] && usb_rule=true
+-  echo "    \"rule_present\": $usb_rule"
++  echo "    \"rule_present\": $usb_rule,"
++  # v16 (change 15): read-only exempt-class diagnostic.
++  local uj_rows uj_dev uj_cls uj_ctl uj_prod uj_first=true uj_auto=0 uj_applicable=false
++  is_managed_file /etc/udev/rules.d/99-usb-autosuspend.rules && uj_applicable=true
++  uj_rows="$(usb_exempt_class_rows)"
++  echo "    \"exempt_class_devices\": ["
++  while IFS=$'\t' read -r uj_dev uj_cls uj_ctl uj_prod; do
++    [[ -n "$uj_dev" ]] || continue
++    [[ "$uj_ctl" == auto ]] && uj_auto=$((uj_auto + 1))
++    if [[ "$uj_first" == true ]]; then uj_first=false; else echo ","; fi
++    printf '      { "device": %s, "classes": %s, "power_control": %s, "product": %s }' \
++      "$(json_string "$uj_dev")" "$(json_string "$uj_cls")" "$(json_string "$uj_ctl")" "$(json_string "$uj_prod")"
++  done <<< "$uj_rows"
++  echo ""
++  echo "    ],"
++  echo "    \"exempt_class_devices_on_auto\": $uj_auto,"
++  echo "    \"mismatch_applicable\": $uj_applicable"
+   echo "  },"
+ 
+   echo "  \"power_profiles_daemon\": {"
