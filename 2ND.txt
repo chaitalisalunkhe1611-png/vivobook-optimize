@@ -1,0 +1,752 @@
+Still reading the script in chunks (it's 5,367 lines and the viewer truncates large ranges), then I'll write the spec. Continuing from line 330.Still reading, about 1,760 of 5,367 lines done. So far I've noted the stale ASPM-workaround messaging in the C-state dashboard and the unconditional `rm -f` calls in restore. Continuing.Roughly 60% of the script is read (through line 3200); the rest is the numbered step blocks and helper generators. Continuing now.About 86% read (through line 4640). Remaining is the auto-power helper, RAPL, kbd timeout, and the closing summary. Continuing.## Executive Summary
+
+v16.0 closes the gap between v15.3 and the machine as it stands today (kernel 7.2.6, S0ix working, mt7921e ASPM workaround removed, no charge cap, PL2 = 45 W, audio power_save staged but not live). The most important problem is that v15.3 treats the mt7921e workaround as mandatory. On this machine `--safe-mode-check` now exits 1 with "DO NOT REBOOT", and the status dashboard, JSON, generated file header and `--restore-defaults` warning all tell the user the wrong story. v16 also fixes several smaller defects in the same spirit:
+- sleep hooks that restart units the user disabled
+- a status/JSON module misreport (i915 shown while xe is bound)
+- a battery-health reader that probably can't see this battery's units
+- missing PC6/S0ix telemetry
+- one dishonest success message (`--battery-limit=off`)
+
+v16 adds no new flags, no new services and no new managed files. It does not alter the philosophy, change any hardware tuning value, or decide on the user's behalf whether the Wi-Fi workaround is needed.
+
+---
+
+## Findings
+
+I read both files in full. I could not verify some items from the two files alone, so each finding is marked. "Type" is either **Real** (a defect or drift) or **Design** (a choice I'd leave or only annotate).
+
+**F-01 — `--safe-mode-check` fails on a healthy machine.**
+- Observed: `safe_mode_check` item [5/5] (lines 2681–2702) adds to `SAFE_FAILS` whenever `mt7921e_present` is true and `$MT7921E_CONF` lacks `disable_aspm=1`. Facts §6 and §31 show mt7921e bound to wlo1, the conf moved to `/root/vivobook-backups/`, 0 Wi-Fi errors, and S0ix working.
+- Matters: the gate exits 1 and prints "DO NOT REBOOT" for a condition the user removed deliberately and verified. A gate that is always red gets ignored.
+- Type: Real (confirmed from both files). Proposed: C-01.
+
+**F-02 — "ASPM workaround required / expected" is hardcoded in about eight places.**
+- Observed:
+  - the flag help (lines 63–68)
+  - the written file header (4499–4505)
+  - the dashboard C-state text, "EXPECTED… do not chase ASPM" (1622–1626)
+  - the dashboard line "not active — Wi-Fi may be unstable" (1885)
+  - the 17a skip text (4517)
+  - the `--restore-defaults` warning (1124–1127)
+  - the `--safe-mode-check` text (2695–2698)
+  - the `aspm_workaround_active` comment (529–530)
+- Facts §15 and §31 show that disabling ASPM was what kept PC6/PC8/S0i3 at 0, and that removing it fixed that with 0 Wi-Fi errors on 7.2.6.
+- Matters: the script now asserts the opposite of what the machine demonstrates. The workaround may still be right on older kernels, so it should become an optional fallback rather than be deleted.
+- Type: Real. Proposed: C-03.
+
+**F-03 — The safe-mode check only verifies the running kernel's signature.**
+- Observed: `running_kernel_signature_state` (637–657) checks `/boot/vmlinuz-$(uname -r)` only.
+- Matters: the gate exists to answer "can I reboot?". The kernel that boots next is the newest installed image. After a cappelikan update where `zz-sign-kernel` fails, the running kernel is still signed, so the gate passes, yet the next boot is refused under Secure Boot (facts §11–12).
+- Type: Real gap against the gate's stated purpose, not drift. Facts show only one image (7.2.6), so it is latent. Proposed: C-02.
+
+**F-04 — Sleep hooks outlive the units they restart.**
+- Observed:
+  - The thermal, EPP and battery hooks run `systemctl restart <unit>` unconditionally on resume (4155–4161, 4316–4322, 3959–3965).
+  - Facts §20 shows `asus-thermal-profile.service` and `intel-epp-profile.service` disabled while `vivobook-power-switch.service` is enabled.
+  - Facts §21 shows the thermal and EPP hooks present.
+  - A restart starts a disabled oneshot. After each resume the static `performance` value (`/etc/default/vivobook-*`, facts §22) is therefore re-asserted through PPD, even on battery where power-switch chose power-saver.
+  - `vivobook-power-switch` is only re-run by udev adapter events and at boot, not on resume.
+- Matters: the dynamic policy is silently overridden after suspend.
+- Type: Real (hook text and unit state confirmed). Whether it causes a visible drift on this machine is not confirmed. Verify with `journalctl -u asus-thermal-profile -b` after a resume. Proposed: C-04.
+- Related: dashboard lines say "Persistent service: disabled/not installed", which cannot distinguish "installed but disabled" (this machine) from "never installed". That ambiguity hides F-04. Folded into C-04.
+
+**F-05 — Audio: the staged file and the SOF branch disagree.**
+- Observed:
+  - Step 12's SOF branch (3757–3769) never writes `audio-powersave.conf` and deletes it with `remove_managed_config` if it carries the marker.
+  - Facts §8 and §22 show SOF loaded and `/etc/modprobe.d/audio-powersave.conf` containing `power_save=10 power_save_controller=N`, which v15.3 can't generate (it writes `1`/`Y`), so it was hand-edited or comes from an older version.
+  - The facts do not say whether that file has the marker. If it does, the next default run deletes the user's staged change. If it doesn't, it is preserved with a NOTE.
+  - Separately, the power-switch audio knob comments and echoes say the knob is "normally unsupported" under SOF (4805–4807, 4896–4898, 5329–5331). Facts §8 and §26 show `snd_hda_intel` loaded with a live `power_save` of 0, so the node exists here and AC writes 0 and battery writes 1 at runtime.
+  - The dashboard has no HD-audio section, so "staged 10, live 0" is invisible.
+- Type: Real in the messaging and status gap. The deletion risk is conditional (Open Question 1). Skipping the static file on SOF is a deliberate design choice and I leave it alone. Proposed: C-05.
+
+**F-06 — Status and JSON report i915 while xe is the bound driver.**
+- Observed: the dashboard (1675) and JSON (2295) test `-d /sys/module/i915` first. Facts §26 lists i915 as "loaded, not bound" and §3 shows xe active via `force_probe`. Result: `i915.module = "i915"`, and `enable_guc` plus dmesg GuC lines are printed under an i915 heading. The `--with-guc` step already uses the bound driver (`detect_active_drm_driver`) and is correct.
+- Type: Real. Proposed: C-06.
+
+**F-07 — Battery health likely can't read this battery.**
+- Observed: `battery_health_rows` (660–674) reads `charge_full` and `charge_full_design` (µAh). Facts §9 reports µWh (42,067,000 / 37,611,000), which implies `energy_*` nodes.
+- Matters: the dashboard would show `health=unavailable` and null JSON for a battery whose ratio is 89.4%.
+- Type: Real if only `energy_*` exist. I can't confirm this from the files (Open Question 2). Proposed: C-07, conditional on that check.
+
+**F-08 — PC6 and S0ix substates are not reported.**
+- Observed: the dashboard and JSON read PC8, PC10 and `slp_s0_residency_usec` only (1612–1639, 2216–2247). Facts §15 shows PC6 and S0i2/S0i3 as the meaningful signals now. The PC8-reached text says "PC10 never entered (check ASPM/USB/audio wakeups)", which points at ASPM, a cause that no longer applies.
+- Type: Real (observability gap). Which pmc_core file exposes S0i2/S0i3 is unconfirmed (Open Question 3). Proposed: C-08.
+
+**F-09 — Two messages claim more than they verified.**
+- Observed:
+  - `--battery-limit=off` always prints "Charge threshold reset to 100% for this session." (3889) after writes wrapped in `|| true`.
+  - The dry-run flag echo (2878–2889) and the final "Flags this run" block (5308–5320) omit `with-mt7921e-aspm`.
+- Type: Real, both minor (the first violates "never print applied when nothing was applied"). Proposed: C-09.
+
+**F-10 — USB exemptions look ineffective for BT and webcam (unconfirmed).**
+- Observed:
+  - The rule file forces `power/control=on` for interface classes 03, e0, 01 and 0e (4536–4552).
+  - Facts §24 shows the mouse (HID) at `on`, but the Bluetooth controller (1-10) and webcam (1-9) at `auto`.
+  - I can't tell from the two files whether the managed rule was ever loaded, or whether something else (the btusb driver's own autosuspend, a hwdb rule, or event ordering) flipped them back after udev.
+- Type: Unconfirmed. I propose a read-only diagnostic only and no rule change. Proposed: C-10.
+
+**F-11 — The version stamp in every generated header forces a one-time rewrite.**
+- Observed: headers embed "v15.3". Every v16 default run rewrites all managed files whose content differs only by that string. These are `99-vivobook.conf`, `system-maintenance.sh`, the service and the timer.
+- Type: Design. I keep the stamp for traceability and document the one-time churn (C-11, Open Question 7).
+
+**Verified correct — no change proposed**
+- **RAPL:** the per-constraint lock probe (I-01) and PL2 < PL1 handling (I-02) match facts §14 (PL1 200 W locked, PL2 45 W, constraint_2 155 W). `/etc/default/vivobook-rapl` matches the template exactly. The lock probe writes the current value back during `--status` as root. That is a documented design choice, and there is no read-only alternative without MSR access.
+- **Sysctl and zram:** the four sysctls in facts §16 match `99-vivobook.conf` (swappiness 100 correctly takes the zram branch). Facts §17 (zstd, priority 100, about 7.4 GB) is consistent with `ZRAM_DESIRED_CONF`.
+- **Power-manager ownership:** TLP is present but masked and inactive, PPD and thermald are active (facts §14). `detect_power_managers` and `tlp_gate` handle this and nothing is gated.
+- **Kernel purge:** the logic maps `linux-image-unsigned-7.2.6-070206-generic` correctly. `/boot` is on the root filesystem at 13%, so the 75% threshold is dormant and correctly annotated.
+- **xe frequency mapping (I-21)** is correct.
+- **Not asserted from the files:** whether `chrome-flags.conf` and `chromium-flags.conf` (facts §23) are stale for uninstalled browsers. §30 is a "selected" list, so I make no claim.
+
+---
+
+## Proposed Changes
+
+Priority runs P0 to P3. The `v16` header stamp is part of C-11. Line numbers refer to v15.3.
+
+### C-01 — `--safe-mode-check`: reclassify the mt7921e item (P0)
+
+**Rationale:** F-01. Removing the workaround is not a boot hazard, and the script can't prove Wi-Fi is unstable, so absence becomes an observation (WARN if errors are visible) instead of a FAIL.
+
+**Files affected:** helpers after line 538, and `safe_mode_check` item [5/5] (2680–2702).
+
+**Exact modification:**
+
+```diff
+@@ after aspm_workaround_active() (line 538)
++# v16 (C-01): read-only, heuristic count of mt7921e error lines this boot.
++# Prints an integer, or "unknown" when no kernel log is readable (dmesg_restrict=1
++# without root and no journal access). Never used to FAIL anything.
++mt7921e_error_count() {
++  local out=""
++  if command -v journalctl >/dev/null 2>&1 &&
++     out="$(journalctl -k -b --no-pager -q 2>/dev/null)" && [[ -n "$out" ]]; then
++    :
++  elif out="$(dmesg 2>/dev/null)" && [[ -n "$out" ]]; then
++    :
++  else
++    printf '%s\n' unknown
++    return 0
++  fi
++  printf '%s\n' "$out" |
++    { grep -iE 'mt7921e?.*(timeout|failed|error|crash|assert)' || true; } | wc -l
++}
+@@ safe_mode_check, item 5 (replace lines 2681-2702)
+-  echo "[5/5] MediaTek MT7902 (mt7921e) ASPM workaround"
++  echo "[5/5] MediaTek MT7902 (mt7921e) Wi-Fi link"
+   if mt7921e_present; then
+     echo "  Interface/driver: in use."
+     if mt7921e_conf_has_disable_aspm; then
+       (unchanged OK branch, plus:)
++      if [[ "$(mt7921e_disable_aspm_live)" == "N" ]]; then
++        echo "  NOTE  disable_aspm=1 is staged but the live module reports N; it applies"
++        echo "        after a module reload or reboot."
++      fi
+     else
+-      echo "  FAIL  mt7921e is in use but $MT7921E_CONF does not set disable_aspm=1 —"
+-      ...
+-      SAFE_FAILS+=("mt7921e ASPM workaround missing: ...")
++      local m_errs; m_errs="$(mt7921e_error_count)"
++      echo "  OK    no disable_aspm=1 workaround configured (live disable_aspm=$(mt7921e_disable_aspm_live));"
++      echo "        driver-default ASPM in use. The workaround is an optional fallback."
++      if [[ "$m_errs" =~ ^[0-9]+$ ]] && (( m_errs > 0 )); then
++        echo "  WARN  $m_errs mt7921e error line(s) in this boot's kernel log. If Wi-Fi is unstable:"
++        echo "        sudo bash $SCRIPT_PATH --with-mt7921e-aspm"
++      elif [[ "$m_errs" == unknown ]]; then
++        echo "  NOTE  kernel log not readable here; mt7921e errors this boot not counted."
++      else
++        echo "  OK    0 mt7921e error lines this boot."
++      fi
+     fi
+```
+
+**Behavior change:** on the reference machine, exit 1 with "DO NOT REBOOT" becomes exit 0 with OK/NOTE lines. The other four items are unchanged and still gate.
+
+**Interaction with existing flags:** read-only, so `--dry-run` and `--restore-defaults` are unaffected. It runs before the root check, as today.
+
+**Risk:** low-medium. A real Wi-Fi regression on a future kernel no longer turns the gate red, so the WARN text is the mitigation. Keeping the signing, pin, signature and Secure Boot items as hard FAILs preserves the gate's original purpose.
+
+**Test cases:**
+- Positive: with no conf and live `N`, exit 0.
+- Negative: simulate a missing signing hook and confirm exit 1 still fires.
+- Staged state: with a managed conf containing `disable_aspm=1` and live `N`, expect the NOTE.
+- Idempotent: two runs give identical output, since the check is read-only.
+
+**Effort:** 1.5 h.
+
+### C-02 — `--safe-mode-check`: also verify the newest installed kernel image (P1)
+
+**Rationale:** F-03. The gate should look at what boots next, not only what is running.
+
+**Files affected:** `running_kernel_signature_state` (637), `safe_mode_check` item [3/5] (2639–2661), and the dashboard line at 1381.
+
+**Exact modification:**
+
+```diff
+-running_kernel_signature_state() {
+-  local k out
+-  k="/boot/vmlinuz-$(uname -r)"
++# v16 (C-02): path-parameterised; same states as before.
++kernel_image_signature_state() {
++  local k="$1" out
+   if [[ ! -f "$k" ]]; then ... (body unchanged, returns the same state strings)
+ }
++running_kernel_signature_state() {
++  kernel_image_signature_state "/boot/vmlinuz-$(uname -r)"
++}
++# Newest /boot/vmlinuz-* by version sort (what GRUB boots by default). Empty if none.
++newest_installed_kernel_image() {
++  local img newest=""
++  for img in /boot/vmlinuz-*; do
++    [[ -f "$img" ]] || continue
++    newest="$img"
++  done < <(printf '%s\n' /boot/vmlinuz-* | sort -V)   # see note below
++  printf '%s\n' "$newest"
++}
+```
+
+Implementation note: use `newest="$(printf '%s\n' /boot/vmlinuz-* 2>/dev/null | sort -V | tail -1)"` and test `[[ -f "$newest" ]]`. This avoids the loop and the process-substitution form above, which is only shown to illustrate intent. In item [3/5], after the running-kernel case block, add:
+
+```diff
++  newest_img="$(newest_installed_kernel_image)"
++  if [[ -n "$newest_img" && "$newest_img" != "/boot/vmlinuz-$(uname -r)" ]]; then
++    case "$(kernel_image_signature_state "$newest_img")" in
++      signed-by-vivobook-key) echo "  OK    newest installed image $newest_img is signed by CN=Vivobook Kernel Key." ;;
++      sbverify-missing)       echo "  UNVERIFIED  sbverify missing; newest image $newest_img not checked."
++                              SAFE_FAILS+=("newest installed kernel image unverified (sbverify missing)") ;;
++      *) echo "  FAIL  newest installed image $newest_img is NOT signed by CN=Vivobook Kernel Key —"
++         echo "        the next boot would be refused under Secure Boot."
++         SAFE_FAILS+=("newest installed kernel image not signed by Vivobook key: $newest_img") ;;
++    esac
++  fi
+```
+
+Only the newest image, and only when it differs from the running one, is checked. Older stock fallbacks signed by Canonical therefore don't produce false FAILs.
+
+**Behavior change:** none on the reference machine today (single image). It adds a hard FAIL for the post-update, pre-reboot case.
+
+**Interaction with existing flags:** read-only; the dashboard keeps the running-kernel wrapper unchanged.
+
+**Risk:** low. The wrapper preserves every existing return value. `sort -V` is already used by the purge logic.
+
+**Test cases:**
+- Positive: a single image gives behavior identical to v15.3.
+- Negative: simulate a newer, unsigned `/boot/vmlinuz-9.9.9` with a fixture and confirm FAIL.
+- Idempotent: read-only.
+
+**Effort:** 2 h.
+
+### C-03 — Make ASPM-workaround wording state-driven, not "required" (P1)
+
+**Rationale:** F-02. Wording follows evidence (live value, config, observed state) instead of a hardcoded claim.
+
+**Files affected:** the nine text sites below. There is no behavior change beyond wording and one additive JSON key.
+
+| Site (v15.3 line) | v16 change |
+|---|---|
+| Flag help 63–68 | "OPTIONAL fallback: only if the Wi-Fi link is unstable on your kernel. It blocks PCIe L1.x on the Wi-Fi link; on the reference machine it kept PC6/PC8/S0i3 at 0 until removed on kernel 7.2.6." (exact text in the section 7 header block below) |
+| Comment 529–530 | Reword to "describes what is configured/live, not a requirement." |
+| Written file header 4499–4505 | Replace the "unstable… expected" comment with the optional-fallback text above. Marker line unchanged. |
+| 17a skip text 4513–4519 | Replace "Wi-Fi may be unstable" with "no disable_aspm=1 option present (driver default ASPM)." |
+| Restore warning 1123–1128 | Replace "REQUIRES … Expect disconnects" with "removing it returns Wi-Fi ASPM to the driver default; re-stage with `--with-mt7921e-aspm` if instability returns." Still printed only when the managed conf exists. |
+| Dashboard 1618–1629 | When PC8 > 0 and PC10 = 0: "PC8 reached; PC10 not entered (informational — see S0ix residency below)". The "EXPECTED" branch stays but fires only when the workaround is actually live or staged. |
+| Dashboard 1882–1886 | Else branch becomes "not configured — driver-default ASPM (live disable_aspm=$live)". |
+| JSON | `aspm_workaround_active` and `deep_pc_states_expected_absent` keep their meaning. Add `aspm_workaround_live` (true only if the live value is Y/1). |
+| Final summary 5331–5332 | Drop "the mt7921e ASPM workaround" from the "reboot to apply" list unless staged this run. |
+
+**Behavior change:** the dashboard no longer says "Wi-Fi may be unstable" or points at ASPM on this machine.
+
+**Interaction with existing flags:** `--with-mt7921e-aspm` behaves identically (same file, same atomic write). Dry-run output changes only in the header comment lines.
+
+**Risk:** low. This is text only, but the header change is part of the rewritten content of a file that doesn't currently exist here.
+
+**Test cases:**
+- Positive: with no conf, the status text is neutral.
+- Negative: stage the conf in a VM and confirm the old EXPECTED branch still prints.
+- Idempotent: a second `--with-mt7921e-aspm` run reports the NO-OP.
+
+**Effort:** 2 h.
+
+### C-04 — Guard sleep hooks, refresh them in place, show installed-vs-enabled (P1)
+
+**Rationale:** F-04.
+
+**Files affected:** the four hook heredocs (battery 3959, thermal 4155, EPP 4316, kbd 5256), one new default-run step, and the "Persistent service" lines in `show_status_dashboard`.
+
+**Exact modification:**
+
+```bash
+# v16 (C-04): single source for the four resume hooks. Restart only if the unit is
+# still enabled; a disabled unit is the operator's explicit "not at boot/resume".
+sleep_hook_body() {
+  local unit="$1"
+  cat <<HOOK
+#!/usr/bin/env bash
+# Managed by vivobook_optimize.sh v16
+if [[ "\${1:-}" == post ]]; then
+  if systemctl is-enabled --quiet ${unit} 2>/dev/null; then
+    systemctl restart ${unit} >/dev/null 2>&1 || true
+  fi
+fi
+HOOK
+}
+```
+
+Each existing hook heredoc becomes `atomic_write <hook> 0755 <<< "$(sleep_hook_body <unit>)"`. A here-string is used per I-24, never a pipe, so `TMP_REGISTRY` survives.
+
+New step, placed after step 15c and before step 16:
+
+```bash
+echo "== 15d. Refresh existing managed sleep hooks (no enable/start) =="
+for pair in vivobook-battery:battery-charge-threshold.service \
+            vivobook-thermal-profile:asus-thermal-profile.service \
+            vivobook-intel-epp:intel-epp-profile.service \
+            vivobook-kbd-timeout:vivobook-kbd-timeout.service; do
+  hook="/usr/lib/systemd/system-sleep/${pair%%:*}"
+  is_managed_file "$hook" || continue            # never create, never touch unmanaged
+  want="$(sleep_hook_body "${pair#*:}")"
+  if [[ "$(cat "$hook" 2>/dev/null)" == "$want" ]]; then
+    echo "   $hook up to date."
+  else
+    atomic_write "$hook" 0755 <<< "$want"
+    chmod 0755 "$hook"
+    echo "   $hook refreshed (restart now guarded by is-enabled)."
+  fi
+done
+```
+
+The step is needed because the hooks on the reference machine only get rewritten when their flag is passed, and passing `--fan-profile` or `--epp` would re-enable the services the user disabled. In dry-run, `atomic_write` is already overridden and only fires on a real difference, so the simulation is accurate.
+
+Status:
+
+```diff
++unit_install_state() {   # enabled | installed-disabled | not-installed
++  local u="$1" f
++  for f in "/etc/systemd/system/$u" "/usr/lib/systemd/system/$u"; do
++    if [[ -e "$f" ]]; then
++      systemctl is-enabled --quiet "$u" 2>/dev/null && { printf '%s\n' enabled; return 0; }
++      printf '%s\n' installed-disabled; return 0
++    fi
++  done
++  printf '%s\n' not-installed
++}
+```
+
+The "Persistent service:" lines (1454–1458, 1512–1516, 1556–1560) print `unit_install_state`. Where a managed hook exists and `grep -q is-enabled <hook>` fails, append "(resume hook UNGUARDED: restarts this unit on resume even though it is not enabled)". JSON adds `battery.service_state`, `thermal.service_state` and `cpu.epp_service_state` (additive).
+
+**Behavior change:** resume no longer starts disabled static-profile units, so dynamic power-switch values are not overridden after suspend. Status shows "installed-disabled" on this machine.
+
+**Interaction with existing flags:** `--fan-profile`, `--epp`, `--battery-limit=N` and `--with-kbd-timeout` still enable the unit and write the hook, now the guarded form. `--restore-defaults` already removes all four hook paths (lines 1079–1082), so no new restore lines are needed. `--dry-run` shows the refresh as a simulated write only when content differs.
+
+**Risk:** medium-low. If `is-enabled` returned non-zero for a legitimately active unit (for example a static unit), the hook would skip it. All four units have `[Install]` sections, so `enabled` is the normal state. Mitigate by testing with the actual units.
+
+**Test cases:**
+- Positive: with the thermal service disabled, suspend and resume, and the journal shows no new start.
+- Negative: with the kbd service enabled, resume still restarts it.
+- Idempotent: the second run prints "up to date" for every hook that exists.
+- Absent hook: it is not created.
+
+**Effort:** 3 h.
+
+### C-05 — Audio: preserve a hand-edited managed file on SOF, add HD-audio status, fix SOF claims (P1)
+
+**Rationale:** F-05.
+
+**Files affected:** step 12 SOF branch (3761–3767), a new helper, a new dashboard and JSON section, and the claim text at 4805–4807, 4896–4898 and 5329–5331 / 5347.
+
+**Exact modification:**
+
+```diff
++# v16 (C-05): content this script's step 12 ever wrote, after the same comment/whitespace
++# normalisation used by managed_or_legacy_adoptable (I-17).
++audio_conf_is_legacy_content() {
++  local norm
++  norm="$(sed -e 's/#.*$//' -e 's/[[:space:]]//g' "$1" 2>/dev/null | tr -d '\n' || true)"
++  [[ "$norm" == "optionssnd_hda_intelpower_save=1power_save_controller=Y" ]]
++}
+@@ step 12, SOF branch
+     if [[ -e /etc/modprobe.d/audio-powersave.conf ]] &&
+        ! is_managed_file /etc/modprobe.d/audio-powersave.conf; then
+       (unchanged unmanaged NOTE)
++    elif is_managed_file /etc/modprobe.d/audio-powersave.conf &&
++         ! audio_conf_is_legacy_content /etc/modprobe.d/audio-powersave.conf; then
++      echo "   NOTE: /etc/modprobe.d/audio-powersave.conf is script-marked but its options differ from"
++      echo "   NOTE: anything this script wrote; it was preserved (treated as hand-edited)."
+     else
+       remove_managed_config /etc/modprobe.d/audio-powersave.conf
+     fi
+```
+
+New dashboard section `[HD Audio power save]`, placed after `[WirePlumber Audio Suspend]` (after line 1774):
+- Live `snd_hda_intel` `power_save` and `power_save_controller` from `/sys/module/snd_hda_intel/parameters/` (or "not exposed").
+- SOF loaded yes/no (`lsmod | grep -q snd_sof_pci_intel`).
+- Staged `/etc/modprobe.d/audio-powersave.conf`: managed or not, and its `options` line.
+- A verdict line when staged values differ from live: "staged values apply on next module load/reboot".
+- Note: with `--with-auto-power`, live `power_save` is written 0 on AC and 1 on battery; the staged value only applies at module load.
+
+JSON adds an `audio` object with `power_save_live`, `power_save_controller_live`, `sof_loaded`, `staged_file_present`, `staged_file_managed` and `staged_options` (all null when unknown). Claim text becomes "snd_hda_intel exposes `power_save` on the reference machine alongside SOF; the helper prints applied/unsupported per run."
+
+**Behavior change:** on SOF machines, a marker-bearing audio file with unfamiliar options is kept instead of deleted. Status finally shows "staged 10, live 0."
+
+**Interaction with existing flags:** `--no-audio-powersave` and `tlp_gate` are untouched. `--restore-defaults` still removes the managed file by marker, as `--restore-defaults` reverses every managed action. Copy a hand-edited file to `/root/vivobook-backups/modprobe/` before restoring.
+
+**Risk:** low. The failure mode is fail-safe: an unrecognised legacy variant is preserved rather than removed. Earlier script versions may have written other values that I can't enumerate from the two files.
+
+**Test cases:**
+- Positive: a marked file with `power_save=10 power_save_controller=N` is preserved with the NOTE.
+- Negative: a marked file with exactly `power_save=1 power_save_controller=Y` is still removed.
+- Unmanaged file: preserved as today.
+- Idempotent: re-run does not rewrite or remove.
+
+**Effort:** 3 h.
+
+### C-06 — Report the bound graphics driver (xe) correctly (P2)
+
+**Rationale:** F-06.
+
+**Files affected:** dashboard `[i915 GuC/HuC]` (1674–1691) and JSON `i915` (2293–2314).
+
+**Exact modification:** compute `gdrv="$(detect_active_drm_driver)"` first.
+
+```diff
+-if [[ -d /sys/module/i915 ]]; then
++gdrv="$(detect_active_drm_driver)"
++if [[ "$gdrv" == i915 || ( "$gdrv" == unknown && -d /sys/module/i915 ) ]]; then
+   (existing i915 branch)
+-elif [[ -d /sys/module/xe ]]; then
+-  echo "  Active graphics module is xe; i915 enable_guc is not applicable."
++elif [[ "$gdrv" == xe || -d /sys/module/xe ]]; then
++  echo "  Active graphics driver is xe; i915 enable_guc is not applicable."
++  [[ -d /sys/module/i915 ]] && echo "  (the i915 module is loaded but not bound to the iGPU.)"
+```
+
+In JSON, `smod` becomes `gdrv` when it is i915 or xe, falling back to the old module test. The five-key shape is unchanged and `enable_*` values stay null unless `smod == i915`.
+
+**Behavior change:** on the reference machine `i915.module` goes from `"i915"` to `"xe"`. This is intentional, and the JSON baseline diff should show exactly this.
+
+**Interaction with existing flags:** none. `--with-guc` already uses `detect_active_drm_driver`.
+
+**Risk:** low. Consumers that key on `i915.module == "i915"` would change, which is called out in schema 3.
+
+**Test cases:**
+- Positive: with xe bound, the status says xe.
+- Negative: a fixture with i915 bound keeps the old output.
+- Idempotent: read-only.
+
+**Effort:** 1 h.
+
+### C-07 — Battery health: `energy_*` fallback (P2, conditional on Open Question 2)
+
+**Rationale:** F-07. Skip this change if `ls /sys/class/power_supply/BAT0/` shows `charge_full`.
+
+**Files affected:** `battery_health_rows` (660–674) and its two callers (1468, 2128).
+
+**Exact modification:** choose the unit once per battery.
+
+```diff
+-    cf="$(status_value "$d/charge_full")"
+-    cfd="$(status_value "$d/charge_full_design")"
++    unit=uAh; cf="$(status_value "$d/charge_full")"; cfd="$(status_value "$d/charge_full_design")"
++    if [[ ! "$cf" =~ ^[0-9]+$ && -r "$d/energy_full" ]]; then
++      unit=uWh; cf="$(status_value "$d/energy_full")"; cfd="$(status_value "$d/energy_full_design")"
++    fi
+@@
+-    printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$cf" "$cfd" "$cyc" "$health"
++    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$cf" "$cfd" "$cyc" "$health" "$unit"
+```
+
+Callers add `bh_unit` as a sixth field. Without it, `read` would fold the unit into `bh_health` and break the existing parse. The dashboard prints the unit instead of the hardcoded "(uAh)". JSON keeps `charge_full_uah` and `charge_full_design_uah` (value only when the unit is uAh, else null) and adds `full`, `full_design` and `unit`.
+
+**Behavior change:** the dashboard shows `health=89.4` for the reference battery (37.611 / 42.067 Wh from facts §9). JSON keys are only added to, never renamed.
+
+**Interaction with existing flags:** read-only; none.
+
+**Risk:** low. The mislabeled-unit risk is avoided by keeping the old keys unit-pure.
+
+**Test cases:**
+- Positive: with an `energy_*`-only fixture the output is 89.4.
+- Negative: with a `charge_*` fixture the output is unchanged from v15.3.
+- Idempotent: read-only.
+
+**Effort:** 2 h.
+
+### C-08 — PC6 and S0ix substate telemetry (P2, path unconfirmed: Open Question 3)
+
+**Rationale:** F-08.
+
+**Files affected:** dashboard `[Modern Standby …]` (1596–1642) and JSON `suspend` (2203–2248).
+
+**Exact modification:**
+- In the existing `package_cstate_show` parse, add `pc6` with `/Package C6/` beside the C8 and C10 awks.
+- Add a read-only probe of `$pmc_dir/substate_residencies`. If readable, the dashboard prints its non-empty lines indented, verbatim. JSON fields `pc6_residency`, `s0i2_residency` and `s0i3_residency` come from a defensive awk (first integer on the matching line) and are null on any non-match.
+- Print a derived line only when readable: "S0i3 residency > 0: deepest suspend substate reached (counters are cumulative since boot)."
+- The reworded PC8 text from C-03 applies here.
+
+**Behavior change:** the dashboard and JSON show PC6 and S0i3 values. Facts §15 expects 5,234,683 for PC6 and 2,231,014 µs for S0i3.
+
+**Interaction with existing flags:** read-only; root is still needed for debugfs, with the same "run as root" notes as today.
+
+**Risk:** low. Parsing is defensive, so a different file format yields null and never a crash.
+
+**Test cases:**
+- Positive: root on the reference machine gives non-zero PC6 and S0i3.
+- Negative: non-root prints the existing debugfs note.
+- Idempotent: read-only.
+
+**Effort:** 2 h.
+
+### C-09 — Honest `--battery-limit=off`, dry-run flag parity (P3)
+
+**Rationale:** F-09.
+
+**Files affected:** step 13 `off` branch (3881–3889), the dry-run echo (2887), the final summary (5317).
+
+**Exact modification:** count what happened.
+
+```diff
+-    for b in /sys/class/power_supply/BAT*/charge_control_end_threshold; do
+-      [[ -w "$b" ]] || continue
+-      if [[ "$DRY_RUN" == true ]]; then echo "[DRY-RUN] Restore $b to 100"
+-      else { printf '%s\n' 100 > "$b"; } 2>/dev/null || true; fi
+-    done
+-    echo "   Charge threshold reset to 100% for this session."
++    BAT_OFF_TOTAL=0; BAT_OFF_OK=0; BAT_OFF_ALREADY=0
++    for b in /sys/class/power_supply/BAT*/charge_control_end_threshold; do
++      [[ -e "$b" ]] || continue
++      BAT_OFF_TOTAL=$((BAT_OFF_TOTAL + 1))
++      if [[ "$(cat "$b" 2>/dev/null || true)" == "100" ]]; then
++        BAT_OFF_ALREADY=$((BAT_OFF_ALREADY + 1)); continue
++      fi
++      [[ -w "$b" ]] || continue
++      if [[ "$DRY_RUN" == true ]]; then
++        echo "[DRY-RUN] Restore $b to 100"; BAT_OFF_OK=$((BAT_OFF_OK + 1))
++      elif { printf '%s\n' 100 > "$b"; } 2>/dev/null; then
++        BAT_OFF_OK=$((BAT_OFF_OK + 1))
++      fi
++    done
++    if (( BAT_OFF_OK > 0 )); then echo "   Charge threshold set to 100% on ${BAT_OFF_OK} of ${BAT_OFF_TOTAL} batteries."
++    elif (( BAT_OFF_ALREADY == BAT_OFF_TOTAL && BAT_OFF_TOTAL > 0 )); then echo "   Charge threshold already 100%; nothing to do."
++    elif (( BAT_OFF_TOTAL == 0 )); then echo "   No charge_control_end_threshold attribute found; nothing to reset."
++    else echo "   WARNING: could not write 100% to ${BAT_OFF_TOTAL} battery threshold attribute(s)." >&2; fi
+```
+
+Dry-run and summary flag lines gain `mt7921e-aspm=$WITH_MT7921E_ASPM`.
+
+**Behavior change:** on this machine (threshold already 100), `--battery-limit=off` now says "already 100%". It no longer claims a reset.
+
+**Interaction with existing flags:** the service, helper and hook removal block above it is unchanged. `--restore-defaults` already counts writes (I-09). Exit codes are unchanged, as other steps warn and continue.
+
+**Risk:** very low.
+
+**Test cases:**
+- Positive: with a threshold of 60, `off` reports "set to 100% on 1 of 1".
+- Negative: a read-only attribute produces a WARNING and not a success line.
+- Idempotent: a second run prints "already 100%".
+
+**Effort:** 1.5 h.
+
+### C-10 — USB exemption diagnostic (P3, read-only)
+
+**Rationale:** F-10. I can't determine the cause from the files, so v16 only reports.
+
+**Files affected:** dashboard `[USB Runtime Autosuspend]` (1777–1782) and JSON `usb_autosuspend` (2366–2370).
+
+**Exact modification:** when the managed rule is present, for each `/sys/bus/usb/devices/<bus>-<port>` (no colon), read `power/control` and the classes of its `<dev>:*/bInterfaceClass` entries. Print one line per device: control, exempt class yes/no, and `MISMATCH` when an exempt class (03, e0, 01, 0e) device is on `auto`. JSON adds `exempt_class_devices_on_auto` (integer).
+
+**Behavior change:** the dashboard may show MISMATCH lines for the BT controller and webcam, as facts §24 suggests. It changes nothing on the system.
+
+**Interaction with existing flags:** read-only. The udev rule and `--with-usb-autosuspend` are untouched.
+
+**Risk:** very low.
+
+**Test cases:**
+- Positive: a fixture with a class-0e device on `auto` prints MISMATCH.
+- Negative: with the rule file absent, nothing is printed.
+- Idempotent: read-only.
+
+**Effort:** 1.5 h.
+
+### C-11 — Version 16.0, schema 3, one-time header refresh (P0, mechanical)
+
+**Rationale:** F-11 and the additive JSON keys in C-03/C-04/C-05/C-07/C-08/C-10.
+
+**Files affected:** `SCRIPT_VERSION` (137), `SCRIPT_SCHEMA` (138), every literal "v15.3" in generated headers and echoes, and the usage header.
+
+**Exact modification:**
+
+```diff
+-SCRIPT_VERSION="15.3"
+-SCRIPT_SCHEMA=2
++SCRIPT_VERSION="16.0"
++SCRIPT_SCHEMA=3
+```
+
+Replace "vivobook_optimize.sh v15.3" with "vivobook_optimize.sh v16" in all generated headers. The marker substring "Managed by vivobook_optimize" is unchanged, so `is_managed_file` and every grep keep working. Update the `log_summary`, dashboard title and "Done —" banner strings. Keep the `# ASUS Vivobook` and `# END-USAGE` anchor lines, because `usage()` extracts the header with sed between them (275–279).
+
+**Behavior change:** the first v16 default run rewrites files whose only difference is the version string, namely `99-vivobook.conf`, `system-maintenance.sh`, the service and the timer. A timer rewrite does not restart it, because I-14 compares `OnCalendar` only. The second run must be a no-op.
+
+**Interaction with existing flags:** all, in a cosmetic way. `--version` prints `16.0 (JSON schema 3)`.
+
+**Risk:** low. A missed "v15.3" literal is cosmetic.
+
+**Test cases:**
+- Positive: `grep -c 'v15\.3' vivobook_optimize_v16.sh` returns 0 apart from the changelog.
+- Negative: `--version` output matches.
+- Idempotent: two consecutive default runs, with the second changing nothing.
+
+**Effort:** 1 h.
+
+**Total effort:** about 21 h across C-01 to C-11.
+
+---
+
+## Non-Goals
+
+- No new flags, services, units or managed files.
+- No automatic enabling or disabling of the mt7921e workaround, and no module reload. The script reports and the user decides.
+- No change to PL1 (firmware-locked), the 45 W PL2 value, per-power-source RAPL limits, or the `performance` default on AC.
+- No automatic re-run or reload of `power_save` values, and no change to the 10/N values.
+- No resume hook for `vivobook-power-switch`. It is only worth adding if the post-resume check in C-04 shows drift (Open Question 9).
+- No cleanup of unmanaged sysctl files (`99-bbr.conf`, `99-optimize.conf`, `99-custom-performance.conf`, `30-brave.conf`, `97-mglru.conf`), and no IPv6 management.
+- No backup or undo mechanism beyond what `--restore-defaults` already does.
+- No change to the kernel cmdline, MOK keys, signing hook creation, the apt pin, or Secure Boot. The script only checks them.
+- No change to TLP, PPD or thermald ownership.
+- No change to the browser flag logic, kernel purge logic, zram logic or BBR logic.
+- No per-suspend S0ix delta tool. The counters stay cumulative since boot.
+
+---
+
+## Testing Plan
+
+Run on the reference machine, or a snapshot of it, and keep a copy of v15.3 beside v16.
+
+1. **Static checks.**
+   - Run `bash -n` on v16.
+   - Run `shellcheck -S warning` on both versions and diff the output. Any new warning must be justified.
+   - Confirm the `# ASUS Vivobook` and `# END-USAGE` anchors are intact by running `--help`.
+
+2. **Dry-run regression.** For each flag combination you use, run:
+   ```
+   diff <(bash v15.3 --dry-run FLAGS | sed 's/v15\.3/vNN/g') \
+        <(bash v16  --dry-run FLAGS | sed 's/v16\(\.0\)\?/vNN/g')
+   ```
+   Differences must be limited to the C-03 header text, the C-04 hook content and new step 15d, the C-09 messages, and the flag echo line. Also snapshot `find /etc /usr/local/bin /usr/lib/systemd -newer <marker>` before and after a dry run to confirm nothing changed.
+
+3. **Idempotency.** Run the real v16 default pass twice with your normal flags.
+   - The first run rewrites the expected set (C-11 plus C-04 hooks).
+   - The second run must produce no file changes (compare `md5sum` and `stat -c %Y` of every managed file) and no timer restart.
+   - Spot-check that `atomic_write` leaves no `.vivobook_optimize*` temp files.
+
+4. **`--restore-defaults`.** Run on a snapshot or VM, not your daily machine.
+   - Install with all flags, then restore.
+   - Run `grep -rl 'Managed by vivobook_optimize' /etc /usr/local /usr/lib/systemd /home/*/.config` and expect no hits.
+   - Check `systemctl list-unit-files | grep vivobook` is empty.
+   - Confirm the four sleep hooks are gone. v16 creates no new artifact paths, so nothing new to clean.
+
+5. **`--status-json` diff against a v15.3 baseline.** Capture the v15.3 JSON first.
+   ```
+   jq -S 'del(.generated,.script)' base.json > a; jq -S 'del(.generated,.script)' v16.json > b; diff a b
+   ```
+   Also confirm every v15.3 key path still exists in v16 using `jq -r 'paths(scalars)|join(".")'` and `comm -23`. Expected differences are only:
+   - `script.version` and `script.schema`
+   - `i915.module` going from `"i915"` to `"xe"` (C-06)
+   - the new additive keys (C-03, C-04, C-05, C-07, C-08, C-10)
+   - battery health populated, if C-07 applies
+
+6. **Per-flag positive and negative cases.**
+
+| Flag or mode | Positive | Negative |
+|---|---|---|
+| `--safe-mode-check` | exit 0 on this machine | break the signing hook (fixture), exit 1 |
+| `--status`, `--status-json` | new sections render | non-root prints the existing root-needed notes |
+| `--battery-limit=off` | at 100: "already 100%" | read-only node: WARNING, no success line |
+| `--with-mt7921e-aspm` | stages the conf, NO-OP on rerun | unmanaged conf left untouched |
+| `--with-kbd-timeout`, `--fan-profile`, `--epp` | guarded hook written | disabled unit is not restarted on resume |
+| `--no-audio-powersave` | file left untouched | n/a |
+| default run (no flags) | hooks refreshed without enabling | absent hook is not created |
+
+7. **Fixture tests for C-05, C-07, C-08, C-10.** The sysfs paths are absolute, so extract the helper functions with `sed -n '/^name()/,/^}/p'` and run them against a temp tree, or bind-mount a fake `power_supply` and `pmc_core` tree under `unshare -m`.
+
+8. **Resume check for C-04.** Disable `asus-thermal-profile.service`, suspend and resume, then run `journalctl -u asus-thermal-profile -b`. v15.3 shows a start after resume and v16 doesn't.
+
+---
+
+## Rollback Plan
+
+**`--restore-defaults` and new artifacts.** v16 creates no new files, units or paths. Everything it writes is either an existing managed path, which `--restore-defaults` already removes, or a rewrite of an existing managed hook. The four sleep-hook rm lines (1079–1082) cover the C-04 refreshed hooks. The restore message wording changes only (C-03).
+
+**Downgrade to v15.3 without data loss.**
+1. Save `--status-json` output from v16 for reference.
+2. If you hand-edited `/etc/modprobe.d/audio-powersave.conf` (10/N) and it carries the marker, copy it to `/root/vivobook-backups/modprobe/` first. v15.3 would delete it on a default run (F-05).
+3. Run v15.3's default pass. It recognises v16 files because the marker substring is unchanged, and rewrites the version stamps back. No state files exist that v15.3 can't read.
+4. v16's guarded sleep hooks are harmless under v15.3. They are only restored to the unguarded form if you re-run the relevant flag.
+5. JSON schema 3 consumers should be repointed to schema 2. The extra keys are additive, so older readers ignore them.
+
+---
+
+## Updated Header / Changelog
+
+Replace lines 3–18 of the script (everything from the title line to the `I-34` entry, inclusive) with:
+
+```
+# ASUS Vivobook 16 (X1605VA) — Optimization Pass v16.0
+# i5-13420H (Raptor Lake-H, 4P+4E) / Intel UHD iGPU / 16GB DDR4 / Micron NVMe
+#
+# v16.0 — drift-correction release (no new flags). Baseline: kernel 7.2.6, S0ix
+# functional, mt7921e ASPM workaround removed, PL2=45 W, no charge cap. Fixes:
+# C-01 --safe-mode-check no longer fails when the mt7921e workaround is absent
+# (WARN on observed errors instead); C-02 newest installed kernel image signature
+# is checked, not only the running one; C-03 ASPM-workaround wording is
+# state-driven, not "required"; C-04 sleep hooks restart only enabled units and
+# are refreshed in place, status separates installed-disabled from not-installed;
+# C-05 hand-edited marked audio file preserved on SOF + HD-audio status (live vs
+# staged); C-06 bound xe driver reported, not a merely loaded i915; C-07 battery
+# health from energy_* when charge_* is absent; C-08 PC6 + S0ix substate
+# telemetry; C-09 --battery-limit=off reports what happened, dry-run/summary flag
+# parity; C-10 USB exemption diagnostic (read-only); C-11 version 16.0, JSON
+# schema 3 (additive keys; i915.module now follows the bound driver).
+```
+
+Replace the `--with-mt7921e-aspm` usage block (lines 63–68) with:
+
+```
+#   sudo bash __SCRIPT_NAME__ --with-mt7921e-aspm                stage the MediaTek MT7902 (mt7921e) ASPM FALLBACK:
+#                                                                /etc/modprobe.d/mt7921e.conf with
+#                                                                'options mt7921e disable_aspm=1'. OPTIONAL: only for
+#                                                                kernels where the Wi-Fi link is unstable. It blocks
+#                                                                PCIe L1.x and kept PC6/PC8/S0i3 at 0 on the reference
+#                                                                machine until removed on kernel 7.2.6. Needs a reboot
+#                                                                (no initramfs rebuild). Unmanaged files are never
+#                                                                overwritten. Not gated by TLP.
+```
+
+Replace the `--safe-mode-check` usage block (lines 94–98) with:
+
+```
+#   bash __SCRIPT_NAME__ --safe-mode-check                       read-only boot-integrity gate. Checks the kernel
+#                                                                signing hook, stock-kernel pin, running AND newest
+#                                                                installed kernel signatures and Secure Boot; reports
+#                                                                the mt7921e Wi-Fi link (informational, never fails the
+#                                                                gate). Exits 1 listing anything missing — do not
+#                                                                reboot until it is resolved
+```
+
+---
+
+## Open Questions
+
+1. **Audio file marker.** Does `/etc/modprobe.d/audio-powersave.conf` (10/N) carry the "Managed by vivobook_optimize" header? Run `head -3` on it. If yes, the next v15.3 default run would delete it and C-05 moves up to P0.
+2. **Battery nodes.** What does `ls /sys/class/power_supply/BAT0/` show: `charge_full` or `energy_full`? This decides whether C-07 is needed.
+3. **S0ix substates.** Which pmc_core file exposes S0i2/S0i3? Run `sudo ls /sys/kernel/debug/pmc_core/ && sudo cat /sys/kernel/debug/pmc_core/substate_residencies`. C-08 assumes that filename.
+4. **Battery leftovers.** Facts §20 and §22 list `battery-charge-threshold.service` (disabled) and `set-battery-threshold.sh`, but `--battery-limit=off` removes both. Was the cap removed by hand? Please send `ls -l` for those paths. v16 only shows the state and doesn't remove anything.
+5. **IPv6 line.** Facts §18 says IPv6 is disabled via `99-vivobook.conf`, but §16 lists four keys, and v15.3 rewrites the whole file on every default run. If you appended IPv6 lines to that managed file, the next run erases them. If so I'd spec C-12: preserve extra active lines on rewrite, and keep them on restore as `restore_iwlwifi_conf` does.
+6. **USB rule.** Is `99-usb-autosuspend.rules` script-managed, and was it loaded after the last `udevadm trigger`? This explains why 1-9 and 1-10 show `auto`.
+7. **Version stamps.** Keep "v16" in every generated header (traceable, one-time rewrite as in C-11) or drop it to avoid future churn? The spec keeps it.
+8. **Gate semantics.** Do you want C-01's WARN to stay exit 0? I assumed yes, since Wi-Fi stability isn't a boot hazard.
+9. **Resume behavior.** After a battery-mode suspend and resume, does `powerprofilesctl get` still match the battery profile? If not even with C-04, a resume hook for `vivobook-power-switch` would be justified.
+10. **Tooling.** Is `sbverify` installed? If not, items [3/5] and C-02 report UNVERIFIED and block the gate.
+
+---
+
+## Recommended Next Round Deliverable
+
+If you approve this plan, I'll produce a unified patch per change (C-01 to C-11, applied in the order above) against v15.3, with exact line anchors. Alongside it I'll provide a `verify_v16.sh` regression runner covering the static checks, the dry-run diffs, the idempotency check and the `--status-json` key diff, plus the sysfs fixtures for C-05/C-07/C-08/C-10. I'll fold in your answers to the open questions: C-07 gets dropped if your battery exposes `charge_*`, and C-12 gets specced if Question 5 confirms the IPv6 hazard.
