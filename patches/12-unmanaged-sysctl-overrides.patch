@@ -1,0 +1,204 @@
+--- a/vivobook_optimize_v16.sh
++++ b/vivobook_optimize_v16.sh
+@@ -1151,6 +1151,99 @@
+     END { if (n) print s; else print "" }'
+ }
+ 
++# ---- v16 (change 12): unmanaged sysctl overrides (report only) --------------
++# Keys this script manages: step 11 (99-vivobook.conf) and step 11b
++# (98-network-bbr.conf). Any UNMARKED sysctl file that also sets one of them is
++# reported in status, JSON and --restore-defaults output — never edited. The
++# reference machine has /etc/sysctl.d/99-bbr.conf, which re-applies BBR after
++# --restore-defaults resets tcp_congestion_control to cubic.
++SYSCTL_MANAGED_KEYS=(
++  vm.swappiness fs.inotify.max_user_watches kernel.nmi_watchdog
++  vm.dirty_writeback_centisecs net.core.default_qdisc net.ipv4.tcp_congestion_control
++)
++# Highest priority first: a basename in an earlier directory shadows the same
++# basename in later ones (systemd-sysctl / procps 'sysctl --system' rules).
++SYSCTL_SCAN_DIRS=(/etc/sysctl.d /run/sysctl.d /usr/local/lib/sysctl.d /usr/lib/sysctl.d /lib/sysctl.d)
++SYSCTL_CONF_FILE=/etc/sysctl.conf
++
++sysctl_managed_file_for_key() {
++  case "$1" in
++    net.core.default_qdisc|net.ipv4.tcp_congestion_control) printf '%s\n' /etc/sysctl.d/98-network-bbr.conf ;;
++    *) printf '%s\n' /etc/sysctl.d/99-vivobook.conf ;;
++  esac
++}
++
++# Effective sysctl files in application order (basename shadowing applied,
++# /dev/null masks honoured, symlinked duplicates removed by realpath),
++# followed by /etc/sysctl.conf, which 'sysctl --system' reads last.
++sysctl_effective_files() {
++  local LC_ALL=C d f b r
++  local -A seen_base=() seen_real=()
++  local -a rows=()
++  for d in "${SYSCTL_SCAN_DIRS[@]}"; do
++    [[ -d "$d" ]] || continue
++    for f in "$d"/*.conf; do
++      [[ -e "$f" || -L "$f" ]] || continue
++      b="${f##*/}"
++      [[ -n "${seen_base[$b]:-}" ]] && continue
++      seen_base[$b]=1
++      rows+=("$b"$'\t'"$f")
++    done
++  done
++  if (( ${#rows[@]} > 0 )); then
++    while IFS=$'\t' read -r b f; do
++      [[ -n "$f" ]] || continue
++      r="$(readlink -f "$f" 2>/dev/null || printf '%s' "$f")"
++      [[ "$r" == /dev/null ]] && continue
++      [[ -f "$r" ]] || continue
++      [[ -n "${seen_real[$r]:-}" ]] && continue
++      seen_real[$r]=1
++      printf '%s\n' "$f"
++    done < <(printf '%s\n' "${rows[@]}" | sort -t $'\t' -k1,1)
++  fi
++  if [[ -f "$SYSCTL_CONF_FILE" ]]; then
++    r="$(readlink -f "$SYSCTL_CONF_FILE" 2>/dev/null || printf '%s' "$SYSCTL_CONF_FILE")"
++    [[ -n "${seen_real[$r]:-}" ]] || printf '%s\n' "$SYSCTL_CONF_FILE"
++  fi
++}
++
++# Rows "<file>\t<key>\t<value>\t<applies>\t<managed_file>" for unmanaged files
++# that set a managed key. <applies>: after (wins over the managed file),
++# before (the managed file wins), no-managed-file (sole source).
++sysctl_unmanaged_overrides() {
++  local LC_ALL=C f src b line key val mk mf mb applies
++  while IFS= read -r f; do
++    [[ -n "$f" ]] || continue
++    is_managed_file "$f" && continue
++    b="${f##*/}"
++    src="$f"
++    while IFS= read -r line || [[ -n "$line" ]]; do
++      line="${line%%#*}"
++      line="${line%%;*}"
++      [[ "$line" == *=* ]] || continue
++      key="${line%%=*}"
++      val="${line#*=}"
++      key="${key//[[:space:]]/}"
++      key="${key#-}"
++      key="${key//\//.}"
++      val="$(printf '%s' "$val" | command sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
++      for mk in "${SYSCTL_MANAGED_KEYS[@]}"; do
++        [[ "$key" == "$mk" ]] || continue
++        mf="$(sysctl_managed_file_for_key "$key")"
++        mb="${mf##*/}"
++        if ! is_managed_file "$mf"; then
++          applies=no-managed-file
++        elif [[ "$f" == "$SYSCTL_CONF_FILE" || "$b" > "$mb" ]]; then
++          applies=after
++        else
++          applies=before
++        fi
++        printf '%s\t%s\t%s\t%s\t%s\n' "$f" "$key" "${val:-(empty)}" "$applies" "$mf"
++      done
++    done < "$src"
++  done < <(sysctl_effective_files)
++}
++
+ remove_i915_conf() {
+   [[ -e "$I915_CONF" ]] || return 0
+   if grep -q "Managed by vivobook_optimize" "$I915_CONF" 2>/dev/null ||
+@@ -1784,6 +1877,16 @@
+       fi
+     fi
+   fi
++  # v16 (change 12): say which unmanaged files will re-apply managed keys.
++  local ro_rows ro_file ro_key ro_val
++  ro_rows="$(sysctl_unmanaged_overrides)"
++  if [[ -n "$ro_rows" ]]; then
++    while IFS=$'\t' read -r ro_file ro_key ro_val _; do
++      [[ -n "$ro_file" ]] || continue
++      echo "   NOTE: $ro_file (not script-managed, left untouched) sets $ro_key = $ro_val;"
++      echo "   NOTE: 'sysctl --system' and the next boot re-apply it."
++    done <<< "$ro_rows"
++  fi
+   command -v sysctl >/dev/null 2>&1 && sysctl --system >/dev/null 2>&1 || true
+   echo "Managed configuration removed."
+   if (( BAT_RESTORE_OK > 0 )); then
+@@ -2414,6 +2517,33 @@
+     echo "  Managed BBR config:  absent"
+   fi
+ 
++  # v16 (change 12): report (never edit) unmanaged files setting managed keys.
++  echo
++  echo "[Unmanaged sysctl overrides of managed keys]"
++  local so_rows so_file so_key so_val so_applies so_mf so_bbr=false
++  so_rows="$(sysctl_unmanaged_overrides)"
++  if [[ -z "$so_rows" ]]; then
++    echo "  none found"
++  else
++    while IFS=$'\t' read -r so_file so_key so_val so_applies so_mf; do
++      [[ -n "$so_file" ]] || continue
++      case "$so_applies" in
++        after)  so_applies="applied AFTER ${so_mf##*/} — this value wins" ;;
++        before) so_applies="applied before ${so_mf##*/} — the managed value wins" ;;
++        *)      so_applies="managed file absent — set by this file" ;;
++      esac
++      echo "  $so_file: $so_key = $so_val ($so_applies)"
++      case "$so_key" in
++        net.core.default_qdisc|net.ipv4.tcp_congestion_control) so_bbr=true ;;
++      esac
++    done <<< "$so_rows"
++    echo "  Report only: this script never edits files it does not manage."
++    if [[ "$so_bbr" == true ]]; then
++      echo "  NOTE: --restore-defaults resets tcp_congestion_control to cubic, but the file(s)"
++      echo "        above re-apply their value on 'sysctl --system' / next boot."
++    fi
++  fi
++
+   echo
+   echo "[Wi-Fi Driver / Power Save]"
+   wifi_found=false
+@@ -3088,8 +3218,33 @@
+   echo "    \"module_available\": $bbr_avail,"
+   echo "    \"tcp_congestion_control\": $(json_string "$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo unknown)"),"
+   echo "    \"default_qdisc\": $(json_string "$(sysctl -n net.core.default_qdisc 2>/dev/null || echo unknown)"),"
+-  echo "    \"config_present\": $bbr_cfg"
+-  echo "  },"
++  echo "    \"config_present\": $bbr_cfg,"
++  # v16 (change 12): unmanaged files that also set BBR keys (report only).
++  local bo_files
++  bo_files="$(sysctl_unmanaged_overrides | awk -F'\t' '$2 == "net.core.default_qdisc" || $2 == "net.ipv4.tcp_congestion_control" { print $1 }' | sort -u)"
++  local bo_first=true bo_f
++  printf '    "unmanaged_override_files": ['
++  while IFS= read -r bo_f; do
++    [[ -n "$bo_f" ]] || continue
++    if [[ "$bo_first" == true ]]; then bo_first=false; else printf ', '; fi
++    printf '%s' "$(json_string "$bo_f")"
++  done <<< "$bo_files"
++  echo "]"
++  echo "  },"
++
++  # v16 (change 12): every unmanaged file that sets a managed sysctl key.
++  local sj_rows sj_file sj_key sj_val sj_applies sj_mf sj_first=true
++  sj_rows="$(sysctl_unmanaged_overrides)"
++  echo "  \"sysctl_overrides\": ["
++  while IFS=$'\t' read -r sj_file sj_key sj_val sj_applies sj_mf; do
++    [[ -n "$sj_file" ]] || continue
++    if [[ "$sj_first" == true ]]; then sj_first=false; else echo ","; fi
++    printf '    { "file": %s, "key": %s, "value": %s, "applies": %s, "managed_file": %s }' \
++      "$(json_string "$sj_file")" "$(json_string "$sj_key")" "$(json_string "$sj_val")" \
++      "$(json_string "$sj_applies")" "$(json_string "$sj_mf")"
++  done <<< "$sj_rows"
++  echo ""
++  echo "  ],"
+ 
+   echo "  \"wifi\": {"
+   local wifi_found=false wifi_first=true
+@@ -4404,6 +4559,14 @@
+ echo "   UID >= 1000 and a real login shell."
+ echo "   Check status any time: journalctl -u system-maintenance.service"
+ 
++# TODO(v16, needs user confirmation — deliberately NOT changed): the machine
++# facts (§18) say IPv6 is disabled via /etc/sysctl.d/99-vivobook.conf, but this
++# step writes only the four keys below and rewrites the whole file. If IPv6
++# lines were added to that file by hand, the first v16 run (header version
++# bump -> one-time rewrite) drops them. Check first with:
++#   grep -n ipv6 /etc/sysctl.d/99-vivobook.conf
++# and move such lines to an unmanaged file (e.g. /etc/sysctl.d/90-ipv6.conf).
++# IPv6 management is out of scope for v16.
+ echo "== 11. Kernel sysctl tuning (/etc/sysctl.d/99-vivobook.conf) =="
+ if [[ "$WITH_SYSCTL" == true ]]; then
+   ZRAM_SWAPPINESS=10

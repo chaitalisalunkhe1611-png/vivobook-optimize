@@ -1,0 +1,262 @@
+--- a/vivobook_optimize_v16.sh
++++ b/vivobook_optimize_v16.sh
+@@ -890,6 +890,87 @@
+   printf '%s\n' "$v"
+ }
+ 
++# ---- v16 (change 6): HD-audio power-save helpers (read-only) ----------------
++AUDIO_CONF=/etc/modprobe.d/audio-powersave.conf
++AUDIO_PARAM_DIR=/sys/module/snd_hda_intel/parameters
++
++# Content step 12 (legacy HDA path) has ever written, after the same
++# comment/whitespace normalisation managed_or_legacy_adoptable (I-17) uses.
++# A marked file with any other options was hand-edited (or comes from an older
++# release) and is preserved on the SOF path.
++audio_conf_is_legacy_content() {
++  local norm
++  norm="$(command sed -e 's/#.*$//' -e 's/[[:space:]]//g' "$1" 2>/dev/null | tr -d '\n' || true)"
++  [[ "$norm" == "optionssnd_hda_intelpower_save=1power_save_controller=Y" ]]
++}
++
++# Live snd_hda_intel parameter, or "unavailable" when not exposed/readable.
++audio_hda_param() {
++  local v=""
++  v="$(cat "$AUDIO_PARAM_DIR/$1" 2>/dev/null || true)"
++  v="${v//[[:space:]]/}"
++  printf '%s\n' "${v:-unavailable}"
++}
++
++# Intel SOF PCI driver loaded? /proc/modules works without lsmod.
++audio_sof_loaded() {
++  grep -q '^snd_sof_pci_intel' /proc/modules 2>/dev/null
++}
++
++# All option tokens of 'options snd_hda_intel ...' lines in the staged file
++# (parsed, never sourced). Empty when absent or no such line.
++audio_staged_options() {
++  [[ -f "$AUDIO_CONF" ]] || return 0
++  command sed -n -e 's/#.*$//' \
++    -e 's/^[[:space:]]*options[[:space:]]\{1,\}snd_hda_intel[[:space:]]\{1,\}//p' \
++    "$AUDIO_CONF" 2>/dev/null | tr -s '[:space:]' ' ' | command sed -e 's/^ //' -e 's/ $//'
++}
++
++# Value of one staged option (last occurrence wins, as with modprobe), or "".
++audio_staged_opt() {
++  local key="$1" tok v=""
++  for tok in $(audio_staged_options); do
++    [[ "$tok" == "$key="* ]] && v="${tok#*=}"
++  done
++  printf '%s\n' "$v"
++}
++
++# Normalise booleans for comparison (Y/y/1 -> Y, N/n/0 -> N).
++audio_norm_bool() {
++  case "$1" in
++    Y|y|1) printf '%s\n' Y ;;
++    N|n|0) printf '%s\n' N ;;
++    *)     printf '%s\n' "$1" ;;
++  esac
++}
++
++# no-staged-file | no-hda-options | live-unavailable | match | staged-differs-from-live
++audio_staged_verdict() {
++  local s_ps s_psc l_ps l_psc differs=false
++  [[ -f "$AUDIO_CONF" ]] || { printf '%s\n' no-staged-file; return 0; }
++  [[ -n "$(audio_staged_options)" ]] || { printf '%s\n' no-hda-options; return 0; }
++  l_ps="$(audio_hda_param power_save)"
++  l_psc="$(audio_hda_param power_save_controller)"
++  if [[ "$l_ps" == unavailable && "$l_psc" == unavailable ]]; then
++    printf '%s\n' live-unavailable
++    return 0
++  fi
++  s_ps="$(audio_staged_opt power_save)"
++  s_psc="$(audio_staged_opt power_save_controller)"
++  if [[ -n "$s_ps" && "$l_ps" != unavailable && "$s_ps" != "$l_ps" ]]; then
++    differs=true
++  fi
++  if [[ -n "$s_psc" && "$l_psc" != unavailable &&
++        "$(audio_norm_bool "$s_psc")" != "$(audio_norm_bool "$l_psc")" ]]; then
++    differs=true
++  fi
++  if [[ "$differs" == true ]]; then
++    printf '%s\n' staged-differs-from-live
++  else
++    printf '%s\n' match
++  fi
++}
++
+ remove_i915_conf() {
+   [[ -e "$I915_CONF" ]] || return 0
+   if grep -q "Managed by vivobook_optimize" "$I915_CONF" 2>/dev/null ||
+@@ -1304,6 +1385,13 @@
+   restore_remove_owned /etc/sysctl.d/99-vivobook.conf || true
+   restore_remove_owned /etc/sysctl.d/98-network-bbr.conf "$BBR_SYSCTL_LEGACY" || true
+   restore_remove_owned /etc/modules-load.d/bbr.conf "tcp_bbr" || true
++  # v16 (change 6): a marked audio file with hand-edited options is still
++  # removed here (restore reverses every managed file), but say so first.
++  if is_managed_file "$AUDIO_CONF" && ! audio_conf_is_legacy_content "$AUDIO_CONF"; then
++    echo "   NOTE: $AUDIO_CONF is script-marked but carries edited options"
++    echo "   NOTE: ($(audio_staged_options)); it is removed as managed. Copy it first if you"
++    echo "   NOTE: want to keep it (e.g. to /root/vivobook-backups/modprobe/)."
++  fi
+   restore_remove_owned /etc/modprobe.d/audio-powersave.conf || true
+ 
+   # v16 (change 2): the disable_aspm=1 workaround is an OPTIONAL fallback. On
+@@ -2000,6 +2088,51 @@
+     echo "  Managed config:      absent"
+   fi
+ 
++  # v16 (change 6): staged vs live snd_hda_intel power-save, read-only.
++  echo
++  echo "[HD Audio power save]"
++  local a_ps a_psc a_verdict a_opts
++  a_ps="$(audio_hda_param power_save)"
++  a_psc="$(audio_hda_param power_save_controller)"
++  echo "  Live snd_hda_intel:  power_save=$a_ps power_save_controller=$a_psc"
++  if audio_sof_loaded; then
++    echo "  Intel SOF:           loaded (snd_hda_intel can still expose power_save alongside SOF)"
++  else
++    echo "  Intel SOF:           not loaded"
++  fi
++  if [[ -f "$AUDIO_CONF" ]]; then
++    a_opts="$(audio_staged_options)"
++    if is_managed_file "$AUDIO_CONF"; then
++      if audio_conf_is_legacy_content "$AUDIO_CONF"; then
++        echo "  Staged file:         $AUDIO_CONF (script-managed, as written by this script)"
++      else
++        echo "  Staged file:         $AUDIO_CONF (script-marked, options edited — preserved)"
++      fi
++    else
++      echo "  Staged file:         $AUDIO_CONF (not script-managed)"
++    fi
++    echo "  Staged options:      ${a_opts:-none for snd_hda_intel}"
++  else
++    echo "  Staged file:         absent"
++  fi
++  a_verdict="$(audio_staged_verdict)"
++  case "$a_verdict" in
++    staged-differs-from-live)
++      echo "  Verdict:             staged differs from live — applies on next module load/reboot" ;;
++    match)
++      echo "  Verdict:             staged matches live" ;;
++    live-unavailable)
++      echo "  Verdict:             live parameters not exposed; staged values apply at module load" ;;
++    no-hda-options)
++      echo "  Verdict:             staged file has no snd_hda_intel options" ;;
++    *)
++      echo "  Verdict:             nothing staged (module defaults at load)" ;;
++  esac
++  if systemctl is-enabled --quiet vivobook-power-switch.service 2>/dev/null; then
++    echo "  Note: --with-auto-power is enabled; it writes live power_save 0 on AC and 1 on"
++    echo "        battery. The staged value only applies at module load."
++  fi
++
+   echo
+   echo "[USB Runtime Autosuspend]"
+   if [[ -f /etc/udev/rules.d/99-usb-autosuspend.rules ]]; then
+@@ -2595,6 +2728,30 @@
+   echo "    \"suspend_timeout_seconds\": 5"
+   echo "  },"
+ 
++  # v16 (change 6): HD-audio power-save, staged vs live (null when unknown).
++  echo "  \"audio\": {"
++  local aj_ps aj_psc aj_ps_j aj_psc_j aj_present=false aj_managed=null aj_legacy=null aj_opts_j=null
++  aj_ps="$(audio_hda_param power_save)"
++  aj_psc="$(audio_hda_param power_save_controller)"
++  if [[ "$aj_ps" =~ ^-?[0-9]+$ ]]; then aj_ps_j="$aj_ps"; else aj_ps_j=null; fi
++  if [[ "$aj_psc" == unavailable ]]; then aj_psc_j=null; else aj_psc_j="$(json_string "$aj_psc")"; fi
++  if [[ -f "$AUDIO_CONF" ]]; then
++    aj_present=true
++    if is_managed_file "$AUDIO_CONF"; then aj_managed=true; else aj_managed=false; fi
++    if audio_conf_is_legacy_content "$AUDIO_CONF"; then aj_legacy=true; else aj_legacy=false; fi
++    aj_opts_j="$(json_string "$(audio_staged_options)")"
++  fi
++  echo "    \"power_save_live\": $aj_ps_j,"
++  echo "    \"power_save_controller_live\": $aj_psc_j,"
++  echo "    \"sof_loaded\": $(audio_sof_loaded && echo true || echo false),"
++  echo "    \"staged_file\": $(json_string "$AUDIO_CONF"),"
++  echo "    \"staged_file_present\": $aj_present,"
++  echo "    \"staged_file_managed\": $aj_managed,"
++  echo "    \"staged_file_script_content\": $aj_legacy,"
++  echo "    \"staged_options\": $aj_opts_j,"
++  echo "    \"staged_vs_live\": $(json_string "$(audio_staged_verdict)")"
++  echo "  },"
++
+   echo "  \"usb_autosuspend\": {"
+   local usb_rule=false
+   [[ -f /etc/udev/rules.d/99-usb-autosuspend.rules ]] && usb_rule=true
+@@ -4051,11 +4208,19 @@
+        ! is_managed_file /etc/modprobe.d/audio-powersave.conf; then
+       echo "   NOTE: /etc/modprobe.d/audio-powersave.conf exists and is not script-managed;"
+       echo "   NOTE: it was preserved. Edit or remove it yourself if it is stale."
++    elif is_managed_file /etc/modprobe.d/audio-powersave.conf &&
++         ! audio_conf_is_legacy_content /etc/modprobe.d/audio-powersave.conf; then
++      # v16 (change 6): marked, but not the content step 12 writes (1/Y) —
++      # hand-edited or from an older release. Never delete it here.
++      echo "   NOTE: /etc/modprobe.d/audio-powersave.conf is script-marked but its options"
++      echo "   NOTE: ($(audio_staged_options)) differ from what this script writes; it was"
++      echo "   NOTE: preserved (treated as hand-edited). It applies at the next module load."
+     else
+       remove_managed_config /etc/modprobe.d/audio-powersave.conf
+     fi
+-    echo "   Intel SOF (snd_sof_pci_intel) is active — internal speakers/mics are"
+-    echo "   managed by SOF; snd_hda_intel power_save options are not forced."
++    echo "   Intel SOF (snd_sof_pci_intel) is active — step 12 stages no snd_hda_intel"
++    echo "   boot options here. snd_hda_intel may still expose power_save at runtime"
++    echo "   (live power_save=$(audio_hda_param power_save)); see the [HD Audio power save] status."
+   elif [[ -d /sys/module/snd_hda_intel ]] || modinfo snd_hda_intel &>/dev/null; then
+     atomic_write /etc/modprobe.d/audio-powersave.conf 0644 << 'EOF'
+ # Managed by vivobook_optimize.sh v16
+@@ -5095,11 +5260,12 @@
+ 
+ apply_audio_powersave() {
+   local val="$1" node=/sys/module/snd_hda_intel/parameters/power_save
+-  # v15.3 (I-25): when Intel SOF owns the internal audio (this machine)
+-  # snd_hda_intel may not be loaded at all, so the node does not exist. That is
+-  # 'unsupported', and the old code called it applied anyway.
++  # v15.3 (I-25): if snd_hda_intel is not loaded the node does not exist. That
++  # is 'unsupported', and the old code called it applied anyway.
++  # v16 (change 6): on the reference machine snd_hda_intel IS loaded alongside
++  # Intel SOF and exposes power_save, so this knob is normally applied there.
+   if [[ ! -e "$node" ]]; then
+-    KNOB_STATE[audio_powersave]="unsupported (snd_hda_intel power_save not exposed; Intel SOF path)"
++    KNOB_STATE[audio_powersave]="unsupported (snd_hda_intel power_save not exposed)"
+     return 0
+   fi
+   if [[ ! -w "$node" ]]; then
+@@ -5187,8 +5353,8 @@
+     echo "   Profiles apply via power-profiles-daemon when active; PPD then also owns"
+     echo "   the platform profile (direct sysfs thermal writes are skipped in that case)."
+     echo "   Without PPD, profiles apply via sysfs directly. Audio power_save: 0 (AC) / 1 (battery)"
+-    echo "   where snd_hda_intel exposes it — on this machine Intel SOF owns the internal"
+-    echo "   audio, so that knob is normally unsupported and is reported as such."
++    echo "   where snd_hda_intel exposes it — on the reference machine it is exposed alongside"
++    echo "   Intel SOF; the helper reports applied/unsupported per run."
+     echo "   The helper prints a per-knob state line (applied / unsupported / failed) and only"
+     echo "   fails when a writable control existed and every write to it was rejected."
+     echo "   No CPU/iGPU frequency clamps, RAPL overrides, backlight changes, or writeback changes."
+@@ -5620,10 +5786,11 @@
+ fi
+ 
+ echo "Also reboot to apply: CPU microcode (if its version changed this run);"
+-echo "snd_hda_intel power_save — only when the legacy HDA path is active, because this"
+-echo "machine uses Intel SOF where step 12 stages nothing; unloading of module"
+-echo "parameters staged by earlier script versions (i915/iwlwifi, if any); and staged"
+-echo "fwupd firmware updates (if --with-auto-upgrade applied any)."
++echo "staged snd_hda_intel boot options (audio-powersave.conf) — they apply only at the"
++echo "next module load (step 12 writes the file only on the legacy HDA path; with Intel"
++echo "SOF it stages nothing); unloading of module parameters staged by earlier script"
++echo "versions (i915/iwlwifi, if any); and staged fwupd firmware updates (if"
++echo "--with-auto-upgrade applied any)."
+ if [[ "$MT7921E_STAGED_THIS_RUN" == true ]]; then
+   echo "The optional mt7921e disable_aspm=1 fallback was staged THIS run: it applies"
+   echo "after a reboot and blocks PCIe L1.x on the Wi-Fi link (deep C-states / S0i3)."
+@@ -5640,7 +5807,7 @@
+ echo "  systemctl list-timers"
+ echo "  journalctl -u system-maintenance.service"
+ echo "  sysctl vm.swappiness fs.inotify.max_user_watches kernel.nmi_watchdog vm.dirty_writeback_centisecs"
+-echo "  cat /sys/module/snd_hda_intel/parameters/power_save   # legacy HDA only; SOF here"
++echo "  cat /sys/module/snd_hda_intel/parameters/power_save   # live value; exposed alongside SOF here"
+ echo "  cat /sys/module/mt7921e/parameters/disable_aspm"
+ echo "  sudo bash $SCRIPT_PATH --safe-mode-check              # boot-integrity gate (Wi-Fi item informational)"
+ echo "  cat /sys/class/power_supply/BAT*/charge_control_end_threshold"

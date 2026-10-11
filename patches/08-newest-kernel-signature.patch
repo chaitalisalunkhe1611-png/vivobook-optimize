@@ -1,0 +1,128 @@
+--- a/vivobook_optimize_v16.sh
++++ b/vivobook_optimize_v16.sh
+@@ -709,9 +709,12 @@
+ 
+ # Prints signed-by-vivobook-key | signed-by-other | unsigned | file-missing |
+ # sbverify-missing. Read-only; never aborts on missing tools or files.
+-running_kernel_signature_state() {
+-  local k out
+-  k="/boot/vmlinuz-$(uname -r)"
++# v16 (change 8): path-parameterised so the NEWEST installed image (the one
++# GRUB boots by default after a kernel update) can be checked too.
++# Prints file-missing | sbverify-missing | unsigned | signed-by-vivobook-key |
++# signed-by-other.
++kernel_image_signature_state() {
++  local k="$1" out
+   if [[ ! -f "$k" ]]; then
+     printf '%s\n' file-missing
+     return 0
+@@ -731,6 +734,24 @@
+   fi
+ }
+ 
++# Kept as a wrapper so existing callers and the JSON key are unchanged.
++running_kernel_signature_state() {
++  kernel_image_signature_state "/boot/vmlinuz-$(uname -r)"
++}
++
++# Newest /boot/vmlinuz-* by version sort (sort -V), ignoring backup copies.
++# Prints the path, or nothing when no image is found.
++newest_installed_kernel_image() {
++  local f
++  for f in /boot/vmlinuz-*; do
++    [[ -f "$f" ]] || continue
++    case "$f" in
++      *.old|*.bak|*.orig|*.unsigned|*.dpkg-*) continue ;;
++    esac
++    printf '%s\n' "$f"
++  done | sort -V | tail -n 1
++}
++
+ # Prints "name<TAB>charge_full<TAB>charge_full_design<TAB>cycle_count<TAB>health%".
+ battery_health_rows() {
+   local d name cf cfd cyc health
+@@ -1782,6 +1803,21 @@
+       echo "  Running kernel:         sbverify not installed; skipping signature check"
+       ;;
+   esac
++  # v16 (change 8): the newest installed image is what boots next by default.
++  local newest_k
++  newest_k="$(newest_installed_kernel_image)"
++  if [[ -z "$newest_k" ]]; then
++    echo "  Newest installed kernel: no /boot/vmlinuz-* found"
++  elif [[ "$newest_k" == "/boot/vmlinuz-$(uname -r)" ]]; then
++    echo "  Newest installed kernel: the running kernel"
++  else
++    case "$(kernel_image_signature_state "$newest_k")" in
++      signed-by-vivobook-key) echo "  Newest installed kernel: $newest_k — signed by CN=Vivobook Kernel Key" ;;
++      signed-by-other)        echo "  Newest installed kernel: $newest_k — signed, but NOT by CN=Vivobook Kernel Key" ;;
++      unsigned)               echo "  Newest installed kernel: $newest_k — NO readable signature" ;;
++      *)                      echo "  Newest installed kernel: $newest_k — signature not checked (sbverify not installed)" ;;
++    esac
++  fi
+ 
+   echo
+   echo "[Kernel source pin]"
+@@ -2484,6 +2520,15 @@
+   echo "    \"signing_hook_path\": $(json_string "$SIGNING_HOOK"),"
+   echo "    \"running_kernel_signature\": $(json_string "$(running_kernel_signature_state)"),"
+   echo "    \"running_kernel\": $(json_string "/boot/vmlinuz-$(uname -r)"),"
++  local newest_kj
++  newest_kj="$(newest_installed_kernel_image)"
++  if [[ -n "$newest_kj" ]]; then
++    echo "    \"newest_kernel_image\": $(json_string "$newest_kj"),"
++    echo "    \"newest_kernel_signature\": $(json_string "$(kernel_image_signature_state "$newest_kj")"),"
++  else
++    echo "    \"newest_kernel_image\": null,"
++    echo "    \"newest_kernel_signature\": null,"
++  fi
+   echo "    \"sbverify_installed\": $(command -v sbverify >/dev/null 2>&1 && echo true || echo false)"
+   echo "  },"
+   echo "  \"kernel_pin\": {"
+@@ -3109,7 +3154,7 @@
+   fi
+ 
+   echo
+-  echo "[3/5] Running-kernel signature (/boot/vmlinuz-$(uname -r))"
++  echo "[3/5] Kernel image signatures (running: /boot/vmlinuz-$(uname -r))"
+   case "$(running_kernel_signature_state)" in
+     signed-by-vivobook-key)
+       echo "  OK    signed by CN=Vivobook Kernel Key."
+@@ -3132,6 +3177,37 @@
+       SAFE_FAILS+=("sbverify not installed; kernel signature unverified")
+       ;;
+   esac
++  # v16 (change 8): after a kernel install, GRUB boots the NEWEST image by
++  # default. If that image is not the running one, it must be signed too, or
++  # the next reboot fails under Secure Boot.
++  local newest_img
++  newest_img="$(newest_installed_kernel_image)"
++  if [[ -n "$newest_img" && "$newest_img" != "/boot/vmlinuz-$(uname -r)" ]]; then
++    echo "  Newest installed image: $newest_img (boots by default after reboot)"
++    case "$(kernel_image_signature_state "$newest_img")" in
++      signed-by-vivobook-key)
++        echo "  OK    newest image signed by CN=Vivobook Kernel Key."
++        ;;
++      signed-by-other)
++        echo "  FAIL  newest image is signed, but NOT by CN=Vivobook Kernel Key."
++        SAFE_FAILS+=("newest installed kernel $newest_img is not signed by CN=Vivobook Kernel Key")
++        ;;
++      unsigned)
++        echo "  FAIL  newest image has no readable signature (the signing hook did not run?)."
++        SAFE_FAILS+=("newest installed kernel $newest_img has no readable signature")
++        ;;
++      file-missing)
++        echo "  FAIL  newest image disappeared while checking: $newest_img"
++        SAFE_FAILS+=("newest installed kernel $newest_img could not be read")
++        ;;
++      *)
++        echo "  UNVERIFIED  sbverify is not installed; the newest image cannot be checked."
++        SAFE_FAILS+=("sbverify not installed; newest installed kernel $newest_img unverified")
++        ;;
++    esac
++  elif [[ -n "$newest_img" ]]; then
++    echo "  INFO  the running kernel is the newest installed image."
++  fi
+ 
+   echo
+   echo "[4/5] Secure Boot"
