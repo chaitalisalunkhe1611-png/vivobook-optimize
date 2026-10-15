@@ -1,0 +1,7 @@
+status exit=0
+status-json exit=0
+jq . exit=0
+default dry-run exit=0
+opt-in dry-run exit=0
+restore dry-run exit=0
+safe-mode-check exit=1 (expected missing laptop boot prerequisites)

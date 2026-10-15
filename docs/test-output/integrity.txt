@@ -1,0 +1,5 @@
+PASS unified patch reconstructs exact v16.1 bytes
+PASS canonical/versioned copies identical
+PASS CLI default declarations unchanged
+PASS CLI parser/flags unchanged
+PASS working-tree public-file privacy scan (known supplied identifiers and sandbox home)

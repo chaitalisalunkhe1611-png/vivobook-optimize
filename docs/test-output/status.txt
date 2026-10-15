@@ -1,0 +1,162 @@
+====================================================
+ASUS Vivobook Optimization v16.1 — System Status
+Generated: Thu Oct 15 11:14:18 UTC 2026
+Script: vivobook_optimize.sh version 16.1 (JSON schema 3)
+====================================================
+
+[Firmware]
+  Product:               unavailable
+  Board:                 unavailable
+  BIOS version:          unavailable
+  BIOS date:             unavailable
+
+[Boot integrity]
+  Secure Boot:            unavailable (install mokutil for a definitive answer)
+  Kernel signing hook:    absent (/etc/kernel/postinst.d/zz-sign-kernel)
+  Running kernel:         /boot/vmlinuz-6.1.158+ not found
+  Newest installed kernel: no /boot/vmlinuz-* found
+
+[Kernel source pin]
+  /etc/apt/preferences.d/block-stock-kernel.pref: absent (stock kernels are not pinned)
+
+[Kernel cmdline]
+  Active DRM driver:     unknown
+  No i915/xe force-probe or pcie_aspm.policy token in /proc/cmdline.
+
+[Power-management ownership (v16)]
+  TLP:        present=false active=false
+  power-profiles-daemon active: false
+  thermald active: false
+  Policy gates: no active TLP — script may own power-policy writes
+
+[Battery charge end threshold]
+  Unsupported or no battery threshold attribute found.
+  Persistent service: not-installed
+
+[Battery health]
+  No battery devices found.
+  (Direct sysfs readings; a healthy design-cycle wear figure is normal on
+   a used laptop. charge_full vs charge_full_design is the health estimate.)
+
+[ACPI / ASUS thermal profile]
+  No supported profile interface found.
+  Persistent service: not-installed
+
+[Intel P-State / Dynamic Turbo / EPP]
+  Scaling driver: unavailable
+  intel_pstate no_turbo interface: unavailable
+  max_perf_pct: unavailable
+  No energy_performance_preference nodes found.
+  Persistent service: not-installed
+
+[Power coherence]
+  power-profiles-daemon now: unavailable
+  Requested thermal profile: not requested this run
+  Requested CPU EPP:         not requested this run
+  Agreement:                 not requested
+  (PPD holds exactly one profile. --fan-profile and --epp are refused at
+   parse time when they would demand two different PPD profiles.)
+
+[Modern Standby (S2idle) / Package C-states]
+  /sys/power/mem_sleep: unavailable
+  pmc_core:          debugfs requires root to read C-state residency
+  S0i2/S0i3:         unavailable (no readable substate_residencies in the expected
+                     format; not inferred from SLP_S0)
+  cpuidle driver:    none
+
+[Intel UHD / Iris iGPU Frequency]
+  Active DRM driver: unknown
+  No Intel DRM device found or interface unavailable.
+
+[i915 GuC/HuC]
+  No DRM driver is bound to a card (neither i915 nor xe drives the display).
+
+[VA-API]
+  vainfo is not installed.
+
+[Browser VA-API / Wayland Flags]
+  User: node (/home/node)
+    brave-flags.conf: absent
+    chrome-flags.conf: absent
+    chromium-flags.conf: absent
+  User: user (/home/<user>)
+    brave-flags.conf: absent
+    chrome-flags.conf: absent
+    chromium-flags.conf: absent
+
+[WirePlumber Audio Suspend]
+  WirePlumber status:  not-installed
+  Managed config:      absent
+
+[HD Audio power save]
+  Live snd_hda_intel:  power_save=unavailable power_save_controller=unavailable
+  Intel SOF:           not loaded
+  Staged file:         absent
+  Verdict:             nothing staged (module defaults at load)
+
+[USB Runtime Autosuspend]
+  Managed udev rule: absent
+  Exempt-class devices: none found
+
+[power-profiles-daemon Conflict State]
+  Service present:  no
+
+[Kernel Sysctl Tuning]
+  vm.swappiness                    unavailable
+  vm.vfs_cache_pressure            unavailable
+  fs.inotify.max_user_watches      unavailable
+  kernel.nmi_watchdog              unavailable
+  vm.dirty_writeback_centisecs     unavailable
+
+[TCP BBR & Queuing]
+  BBR module support:  unavailable
+  Congestion control:  unknown
+  Default qdisc:       unknown
+  Managed BBR config:  absent
+
+[Unmanaged sysctl overrides of managed keys]
+  /etc/sysctl.d/99-sysctl.conf: fs.inotify.max_user_watches = 65536 (managed file absent — set by this file)
+  Report only: this script never edits files it does not manage.
+
+[Wi-Fi Driver / Power Save]
+  No wireless interface detected.
+
+[Wi-Fi ASPM — MediaTek MT7902 (mt7921e)]
+  mt7921e in use:        no (module not loaded and no interface bound)
+  disable_aspm (live):   unavailable
+  Config:                /etc/modprobe.d/mt7921e.conf absent
+  ASPM workaround:       not configured — driver-default ASPM (live disable_aspm=unavailable);
+                         optional fallback: --with-mt7921e-aspm, only if the link is unstable
+
+[Timers]
+  fstrim.timer                enabled=not-found  next=unknown
+  system-maintenance.timer    enabled=not-found  next=unknown
+
+[Maintenance last run]
+  ActiveState:           unavailable (service not installed)
+  ExecMainStatus:        unavailable
+  ActiveExitTimestamp:   unavailable
+
+[zRAM]
+  No zRAM block device found.
+  zram-generator config: absent
+  zramswap.service (legacy zram-tools): disabled/not installed
+
+[Intel RAPL Power Limits]
+  No RAPL powercap interface found.
+  Persistent service: disabled/not installed
+
+[NVMe I/O Scheduler]
+  No NVMe block devices found.
+
+[Dynamic AC/Battery Power Switching]
+  Boot service: disabled/not installed
+  udev rule: absent
+  AC adapter online: unknown
+
+[Keyboard Backlight Timeout]
+  Persistent service: not-installed
+  Backlight device: not found
+====================================================
+Status mode is read-only; no configuration was changed.
+====================================================

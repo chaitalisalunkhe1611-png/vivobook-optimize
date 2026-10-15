@@ -1,0 +1,32 @@
+=== DRY RUN MODE ===
+Parsed flags: guc=false
+  auto-upgrade=false maintenance-schedule=weekly
+  multiverse=false battery-limit=unchanged
+  sysctl=true audio-powersave=true
+  fan-profile=unchanged epp=unchanged
+  zram=false
+  auto-power=false pl1=unchanged pl2=unchanged
+  kbd-timeout=false
+  bbr=false browser-wayland=false
+  usb-autosuspend=false disable-ppd=false
+  mt7921e-aspm=false
+  force-tlp-override=false
+  skip-update=false full-upgrade=false
+
+Simulated actions follow; nothing below is applied.
+
+== Restoring ASUS Vivobook v16.1 managed defaults ==
+[DRY-RUN] rm /run/vivobook-power-switch.lock (not present — no-op)
+[DRY-RUN] rm /run/system-maintenance.lock (not present — no-op)
+[DRY-RUN] If custom sysctls were preserved: would return them to unmarked 99-vivobook.conf and remove owned 90-vivobook-local.conf.
+[DRY-RUN] udevadm control --reload-rules
+[DRY-RUN] systemctl daemon-reload
+   NOTE: /etc/sysctl.d/99-sysctl.conf (not script-managed, left untouched) sets fs.inotify.max_user_watches = 65536;
+   NOTE: 'sysctl --system' and the next boot re-apply it.
+Managed configuration removed.
+Battery charge limit: no charge_control_end_threshold attribute found; nothing to restore.
+CPU max_perf_pct reset to 100 where writable; swappiness, writeback and (when BBR was managed) tcp_congestion_control reset, then distro sysctls reapplied.
+Reboot to reset remaining live module, RAPL, and other hardware settings.
+No apt packages were removed.
+[DRY-RUN] Append v16.1 run summary to /var/log/vivobook-optimize.log
+=== END DRY RUN — no files were modified. ===

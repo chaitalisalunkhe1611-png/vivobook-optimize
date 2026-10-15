@@ -1,0 +1,36 @@
+name: Bug report
+description: Report a reproducible script or hardware-policy problem.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: "Redact usernames, hostnames, home paths, serial numbers and other identifiers. Never attach signing keys, backup directories or private configuration. Do not run a mutating command merely to file an issue."
+  - type: input
+    id: version
+    attributes:
+      label: Script version
+      description: "Output of: bash vivobook_optimize.sh --version"
+    validations:
+      required: true
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel and distribution
+      description: "uname -r and distribution version; note xe or i915 if known."
+    validations:
+      required: true
+  - type: textarea
+    id: status
+    attributes:
+      label: Redacted --status-json output
+      description: "bash vivobook_optimize.sh --status-json (sudo optional). Review and redact before posting."
+      render: json
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction, flags, expected and actual results
+      description: Include whether TLP/PPD was active, AC/battery state, and whether it followed resume. Redact any personal paths.
+    validations:
+      required: true

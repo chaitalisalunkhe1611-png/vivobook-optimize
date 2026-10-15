@@ -1,0 +1,691 @@
+=== DRY RUN MODE ===
+Parsed flags: guc=false
+  auto-upgrade=false maintenance-schedule=weekly
+  multiverse=false battery-limit=off
+  sysctl=true audio-powersave=true
+  fan-profile=unchanged epp=unchanged
+  zram=false
+  auto-power=true pl1=unchanged pl2=unchanged
+  kbd-timeout=false
+  bbr=false browser-wayland=true
+  usb-autosuspend=true disable-ppd=false
+  mt7921e-aspm=false
+  force-tlp-override=false
+  skip-update=true full-upgrade=false
+
+Simulated actions follow; nothing below is applied.
+
+== Power-management ownership (TLP / power-profiles-daemon / thermald) ==
+   TLP: present=false active=false
+   power-profiles-daemon: active=false (helpers delegate via powerprofilesctl when active)
+   thermald: active=false (thermal policy left to thermald)
+== 1-3. Skipping update/fwupd/snap/flatpak (--skip-update) ==
+== 4. thermald ==
+[DRY-RUN] apt-get -y -o Dpkg::Options::=--force-confold -o DPkg::Lock::Timeout=600 install thermald
+[DRY-RUN] systemctl enable --now thermald
+== 5. powertop (interactive diagnostics only) ==
+[DRY-RUN] apt-get -y -o Dpkg::Options::=--force-confold -o DPkg::Lock::Timeout=600 install powertop
+[DRY-RUN] systemctl daemon-reload
+   powertop installed for interactive, read-only diagnostics: sudo powertop
+   Script-managed powertop-autotune.service removed if present; unowned units preserved.
+== 6. NVMe TRIM — weekly timer ==
+[DRY-RUN] systemctl enable --now fstrim.timer
+== 7. CPU microcode ==
+[DRY-RUN] apt-get -y -o Dpkg::Options::=--force-confold -o DPkg::Lock::Timeout=600 install intel-microcode
+== 8. Intel VA-API / QuickSync ==
+   'intel-media-va-driver-non-free' has no candidate and this does not look like
+   Ubuntu (os-release: 'debian') — not touching repository configuration.
+   WARNING: no Intel VA-API driver package has an installable candidate in
+   your enabled repos. Skipping. Check: sudo add-apt-repository multiverse
+== 9. i915 legacy config cleanup + Intel DRM / GuC-HuC diagnostics ==
+   Skipped. Re-run with --with-guc for read-only DRM/GuC/HuC diagnostics.
+== 10. Automated maintenance (weekly) ==
+[DRY-RUN] -> Write file: /usr/local/bin/system-maintenance.sh (mode 0755)
+[DRY-RUN]   | #!/usr/bin/env bash
+[DRY-RUN]   | # Managed by vivobook_optimize.sh v16.1
+[DRY-RUN]   | set -Eeuo pipefail
+[DRY-RUN]   | 
+[DRY-RUN]   | exec 9>/run/system-maintenance.lock
+[DRY-RUN]   | flock -n 9 || { echo "Another maintenance run is already in progress. Exiting."; exit 0; }
+[DRY-RUN]   | 
+[DRY-RUN]   | export DEBIAN_FRONTEND=noninteractive
+[DRY-RUN]   | 
+[DRY-RUN]   | JOURNAL_VACUUM_TIME="2weeks"
+[DRY-RUN]   | JOURNAL_VACUUM_SIZE="500M"
+[DRY-RUN]   | 
+[DRY-RUN]   | # v15.2: classify the outcome explicitly. Genuine failures are never hidden:
+[DRY-RUN]   | # the run ends FAILED (set -e), ends with NON-FATAL WARNINGS (network outage
+[DRY-RUN]   | # during apt-get update, a flaky flatpak remote, etc.), or fully SUCCEEDS.
+[DRY-RUN]   | WARN_COUNT=0
+[DRY-RUN]   | SUCCESS=false
+[DRY-RUN]   | trap '
+[DRY-RUN]   |   rc=$?
+[DRY-RUN]   |   if [[ "$SUCCESS" == true ]] && (( WARN_COUNT == 0 )); then
+[DRY-RUN]   |     echo "=== Completed successfully: $(date) ==="
+[DRY-RUN]   |   elif [[ "$SUCCESS" == true ]]; then
+[DRY-RUN]   |     echo "=== Completed with ${WARN_COUNT} non-fatal warning(s): $(date) ==="
+[DRY-RUN]   |   else
+[DRY-RUN]   |     echo "=== FAILED: $(date), exit $rc ==="
+[DRY-RUN]   |   fi
+[DRY-RUN]   | ' EXIT
+[DRY-RUN]   | 
+[DRY-RUN]   | warn() {
+[DRY-RUN]   |   WARN_COUNT=$((WARN_COUNT + 1))
+[DRY-RUN]   |   echo "   WARNING: $*" >&2
+[DRY-RUN]   | }
+[DRY-RUN]   | 
+[DRY-RUN]   | echo "=== Starting Maintenance: $(date) ==="
+[DRY-RUN]   | if ! apt-get -o DPkg::Lock::Timeout=900 update; then
+[DRY-RUN]   |   warn "apt-get update failed (offline / mirror error?) — continuing independent maintenance steps."
+[DRY-RUN]   | fi
+[DRY-RUN]   | 
+[DRY-RUN]   | # Automated package upgrades and kernel pruning are intentionally NOT performed
+[DRY-RUN]   | # by this timer: standard security updates (including kernel management) are
+[DRY-RUN]   | # delegated to the distro's unattended-upgrades configuration.
+[DRY-RUN]   | echo "   (Skipping package upgrades/kernel pruning: standard security updates are"
+[DRY-RUN]   | echo "    handled by the distro's unattended-upgrades configuration.)"
+[DRY-RUN]   | apt-get -y autoclean || warn "apt-get autoclean failed"
+[DRY-RUN]   | 
+[DRY-RUN]   | if command -v flatpak &>/dev/null; then
+[DRY-RUN]   |   flatpak update -y || warn "system flatpak update failed"
+[DRY-RUN]   | 
+[DRY-RUN]   |   if command -v runuser &>/dev/null; then
+[DRY-RUN]   |     while IFS=: read -r U_NAME _ U_UID _ _ U_HOME U_SHELL; do
+[DRY-RUN]   |       [[ "$U_UID" =~ ^[0-9]+$ ]] || continue
+[DRY-RUN]   |       (( U_UID >= 1000 && U_UID < 65000 )) || continue
+[DRY-RUN]   |       case "$U_SHELL" in
+[DRY-RUN]   |         */nologin|*/false|"") continue ;;
+[DRY-RUN]   |       esac
+[DRY-RUN]   |       [[ -n "$U_HOME" && -d "$U_HOME" ]] || continue
+[DRY-RUN]   |       [[ -d "$U_HOME/.local/share/flatpak" ]] || continue
+[DRY-RUN]   |       if [[ ! -e "/run/user/$U_UID/bus" ]]; then
+[DRY-RUN]   |         echo "   Skipping user flatpak update for $U_NAME: D-Bus session bus is unavailable."
+[DRY-RUN]   |         continue
+[DRY-RUN]   |       fi
+[DRY-RUN]   |       echo "   Updating user-scoped flatpaks for: $U_NAME"
+[DRY-RUN]   |       runuser -u "$U_NAME" -- env \
+[DRY-RUN]   |         HOME="$U_HOME" \
+[DRY-RUN]   |         XDG_DATA_HOME="$U_HOME/.local/share" \
+[DRY-RUN]   |         XDG_CACHE_HOME="$U_HOME/.cache" \
+[DRY-RUN]   |         XDG_RUNTIME_DIR="/run/user/$U_UID" \
+[DRY-RUN]   |         DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$U_UID/bus" \
+[DRY-RUN]   |         flatpak --user update -y --noninteractive ||
+[DRY-RUN]   |         warn "user flatpak update failed for $U_NAME (continuing)"
+[DRY-RUN]   |     done < /etc/passwd
+[DRY-RUN]   |   else
+[DRY-RUN]   |     echo "   NOTE: 'runuser' not available — skipping per-user flatpak updates."
+[DRY-RUN]   |   fi
+[DRY-RUN]   | fi
+[DRY-RUN]   | 
+[DRY-RUN]   | # Developer runtimes: pipx-managed tools per user session
+[DRY-RUN]   | if command -v runuser &>/dev/null; then
+[DRY-RUN]   |   while IFS=: read -r U_NAME _ U_UID _ _ U_HOME U_SHELL; do
+[DRY-RUN]   |     [[ "$U_UID" =~ ^[0-9]+$ ]] || continue
+[DRY-RUN]   |     (( U_UID >= 1000 && U_UID < 65000 )) || continue
+[DRY-RUN]   |     case "$U_SHELL" in
+[DRY-RUN]   |       */nologin|*/false|"") continue ;;
+[DRY-RUN]   |     esac
+[DRY-RUN]   |     [[ -n "$U_HOME" && -d "$U_HOME" ]] || continue
+[DRY-RUN]   |     [[ -d "$U_HOME/.local/share/pipx/venvs" || -d "$U_HOME/.local/pipx/venvs" ]] || continue
+[DRY-RUN]   |     PIPX_BIN=""
+[DRY-RUN]   |     if [[ -x "$U_HOME/.local/bin/pipx" ]]; then
+[DRY-RUN]   |       PIPX_BIN="$U_HOME/.local/bin/pipx"
+[DRY-RUN]   |     elif command -v pipx &>/dev/null; then
+[DRY-RUN]   |       PIPX_BIN="$(command -v pipx)"
+[DRY-RUN]   |     fi
+[DRY-RUN]   |     [[ -n "$PIPX_BIN" ]] || continue
+[DRY-RUN]   |     echo "   Upgrading pipx-managed tools for: $U_NAME"
+[DRY-RUN]   |     runuser -u "$U_NAME" -- env \
+[DRY-RUN]   |       HOME="$U_HOME" \
+[DRY-RUN]   |       PATH="$U_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+[DRY-RUN]   |       "$PIPX_BIN" upgrade-all ||
+[DRY-RUN]   |       warn "pipx upgrade-all failed for $U_NAME (continuing)"
+[DRY-RUN]   |   done < /etc/passwd
+[DRY-RUN]   | fi
+[DRY-RUN]   | 
+[DRY-RUN]   | if command -v fwupdmgr &>/dev/null; then
+[DRY-RUN]   |   fwupdmgr refresh || warn "fwupd metadata refresh failed"
+[DRY-RUN]   |   # Do not run fwupdmgr update unattended
+[DRY-RUN]   | fi
+[DRY-RUN]   | 
+[DRY-RUN]   | if command -v journalctl &>/dev/null; then
+[DRY-RUN]   |   echo "   Vacuuming journal (time > ${JOURNAL_VACUUM_TIME}, size > ${JOURNAL_VACUUM_SIZE})"
+[DRY-RUN]   |   journalctl --vacuum-time="${JOURNAL_VACUUM_TIME}" || warn "journal vacuum by time failed"
+[DRY-RUN]   |   journalctl --vacuum-size="${JOURNAL_VACUUM_SIZE}" || warn "journal vacuum by size failed"
+[DRY-RUN]   |   journalctl --disk-usage || true
+[DRY-RUN]   | fi
+[DRY-RUN]   | 
+[DRY-RUN]   | SUCCESS=true
+[DRY-RUN] chmod 0755 /usr/local/bin/system-maintenance.sh
+[DRY-RUN] -> Install systemd unit: /etc/systemd/system/system-maintenance.service (mode 0644)
+[DRY-RUN]   | # Managed by vivobook_optimize.sh v16.1
+[DRY-RUN]   | [Unit]
+[DRY-RUN]   | Description=Automated System Maintenance and Updates
+[DRY-RUN]   | After=network-online.target
+[DRY-RUN]   | Wants=network-online.target
+[DRY-RUN]   | # v15.2: ConditionACPower=true removed. With a monthly timer it could skip
+[DRY-RUN]   | # maintenance indefinitely on an often-unplugged laptop; Persistent=true on
+[DRY-RUN]   | # the timer already reschedules runs missed while powered off, and the
+[DRY-RUN]   | # workload (update index refresh, autoclean, journal vacuum) is safe on
+[DRY-RUN]   | # battery and deliberately niced down.
+[DRY-RUN]   | 
+[DRY-RUN]   | [Service]
+[DRY-RUN]   | Type=oneshot
+[DRY-RUN]   | TimeoutStartSec=1h
+[DRY-RUN]   | Nice=10
+[DRY-RUN]   | IOSchedulingClass=best-effort
+[DRY-RUN]   | IOSchedulingPriority=6
+[DRY-RUN]   | ExecStart=/usr/local/bin/system-maintenance.sh
+[DRY-RUN]   | StandardOutput=journal
+[DRY-RUN]   | StandardError=journal
+[DRY-RUN] -> Install systemd unit: /etc/systemd/system/system-maintenance.timer (mode 0644)
+[DRY-RUN]   | # Managed by vivobook_optimize.sh v16.1
+[DRY-RUN]   | [Unit]
+[DRY-RUN]   | Description=Run weekly system maintenance
+[DRY-RUN]   | 
+[DRY-RUN]   | [Timer]
+[DRY-RUN]   | OnCalendar=weekly
+[DRY-RUN]   | Persistent=true
+[DRY-RUN]   | RandomizedDelaySec=1h
+[DRY-RUN]   | 
+[DRY-RUN]   | [Install]
+[DRY-RUN]   | WantedBy=timers.target
+[DRY-RUN] systemctl daemon-reload
+[DRY-RUN] systemctl enable --now system-maintenance.timer
+[DRY-RUN] systemctl restart system-maintenance.timer
+   Maintenance timer (re)started: schedule changed from 'none' to 'weekly'.
+
+   Maintenance timer configured. Schedule: weekly.
+   This value reflects only this run — re-run with a different
+   --maintenance-schedule to change it later.
+   The timer never runs package upgrades, kernel purges, or firmware flashes:
+   security updates are delegated to unattended-upgrades, and firmware
+   updates require a supervised 'sudo fwupdmgr update' (only the metadata
+   refresh runs unattended).
+   Maintenance also vacuums the journal (2 weeks / 500M), upgrades pipx-managed
+   tools, and updates per-user flatpak installations for accounts with
+   UID >= 1000 and a real login shell.
+   Check status any time: journalctl -u system-maintenance.service
+== 11. Kernel sysctl tuning (/etc/sysctl.d/99-vivobook.conf) ==
+[DRY-RUN] -> Write file: /etc/sysctl.d/99-vivobook.conf (mode 0644)
+[DRY-RUN]   | # Managed by vivobook_optimize.sh v16.1 — safe, targeted desktop/laptop tuning.
+[DRY-RUN]   | # Use --restore-defaults to remove this file, reset writeback, and reapply distro sysctls.
+[DRY-RUN]   | 
+[DRY-RUN]   | # 16GB RAM: prefer keeping the working set resident, but do NOT disable swap
+[DRY-RUN]   | # pressure entirely (0/1 harms reclaim behaviour and hibernation headroom).
+[DRY-RUN]   | vm.swappiness = 10
+[DRY-RUN]   | 
+[DRY-RUN]   | # IDEs, file managers, sync clients and dev tooling routinely exhaust the
+[DRY-RUN]   | # default watch limit; 524288 is the widely used desktop value.
+[DRY-RUN]   | fs.inotify.max_user_watches = 524288
+[DRY-RUN]   | 
+[DRY-RUN]   | # Disable NMI watchdog to reduce periodic CPU wakeups and save energy.
+[DRY-RUN]   | kernel.nmi_watchdog = 0
+[DRY-RUN]   | 
+[DRY-RUN]   | # Idle VM dirty page writeback interval extended to 15 seconds.
+[DRY-RUN]   | vm.dirty_writeback_centisecs = 1500
+[DRY-RUN] chmod 0644 /etc/sysctl.d/99-vivobook.conf
+   Written and applied. Effective values now:
+     vm.swappiness = unavailable (optional kernel interface)
+     fs.inotify.max_user_watches = unavailable (optional kernel interface)
+     kernel.nmi_watchdog = unavailable (optional kernel interface)
+     vm.dirty_writeback_centisecs = unavailable (optional kernel interface)
+   NOTE: another file in /etc/sysctl.d/ that sorts AFTER 99-vivobook.conf
+   (or /etc/sysctl.conf semantics on some setups) can still override these.
+== 11b. TCP BBR & Fair Queuing (/etc/sysctl.d/98-network-bbr.conf) ==
+   Skipped. Re-run with --with-bbr to enable TCP BBR.
+== 12. Intel HD Audio power saving ==
+   snd_hda_intel not present on this system — skipping (no file written).
+== 12b. WirePlumber ALSA suspend timeout (upstream default) ==
+   WirePlumber's upstream 5s ALSA suspend timeout default is retained;
+   managed WirePlumber configuration files removed if present.
+== 13. ASUS battery charge threshold (asus_wmi) ==
+[DRY-RUN] systemctl daemon-reload
+   No 'charge_control_end_threshold' attribute found under /sys/class/power_supply/BAT*.
+   Either asus_wmi/asus_nb_wmi is not bound, or this firmware doesn't expose the
+   knob. Nothing to configure. Diagnose with:
+     lsmod | grep -i asus
+     ls /sys/class/power_supply/
+== 14. ACPI platform profile / ASUS thermal profile ==
+   Not requested — no thermal profile changes made.
+== 15. Intel P-State Energy Performance Preference (EPP) ==
+   Not requested — no EPP changes made.
+== 15c. power-profiles-daemon conflict resolution (--disable-ppd) ==
+   Skipped. Re-run with --disable-ppd to resolve potential desktop EPP overlaps.
+== 15d. Refresh existing managed sleep hooks (no create/enable/start) ==
+   No resume hooks installed; nothing to refresh (none are created here).
+== 16. zRAM compressed in-memory swap ==
+   Skipped. Re-run with --with-zram to install and configure systemd-zram-generator.
+== 17. Wi-Fi runtime power management (driver-agnostic, via iw) ==
+   No wireless interface detected on this run.
+   No static wifi module options are staged by this step (upstream driver defaults
+   kept). The optional MediaTek MT7902 ASPM fallback is handled separately in step 17a.
+   Wi-Fi power saving is controlled dynamically via 'iw dev <iface> set power_save'
+   (AC off / battery on with --with-auto-power).
+== 17a. MediaTek MT7902 (mt7921e) optional ASPM fallback (--with-mt7921e-aspm) ==
+   Skipped (optional fallback; live disable_aspm=unavailable).
+   Use --with-mt7921e-aspm only if the Wi-Fi link is unstable on your kernel.
+== 17b. USB Runtime Autosuspend (--with-usb-autosuspend) ==
+[DRY-RUN] -> Write file: /etc/udev/rules.d/99-usb-autosuspend.rules (mode 0644)
+[DRY-RUN]   | # Managed by vivobook_optimize.sh v16.1 --with-usb-autosuspend
+[DRY-RUN]   | # Enable USB runtime autosuspend by default
+[DRY-RUN]   | ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{power/control}="auto"
+[DRY-RUN]   | 
+[DRY-RUN]   | # Exempt USB HID devices (class 03) globally from autosuspend to prevent
+[DRY-RUN]   | # keyboard/mouse/receiver input lag
+[DRY-RUN]   | ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="03", TEST=="../power/control", ATTR{../power/control}="on"
+[DRY-RUN]   | 
+[DRY-RUN]   | # Exempt USB Wireless / Bluetooth host controllers (class e0) from autosuspend
+[DRY-RUN]   | # to prevent Bluetooth mouse/keyboard/headset lag and disconnects
+[DRY-RUN]   | ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="e0", TEST=="../power/control", ATTR{../power/control}="on"
+[DRY-RUN]   | 
+[DRY-RUN]   | # Exempt USB audio (bInterfaceClass 01) from autosuspend: avoid pops and
+[DRY-RUN]   | # delayed playback on DACs/headsets
+[DRY-RUN]   | ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="01", TEST=="../power/control", ATTR{../power/control}="on"
+[DRY-RUN]   | 
+[DRY-RUN]   | # Exempt UVC video (bInterfaceClass 0e) from autosuspend: avoid delayed first
+[DRY-RUN]   | # frames and dropped webcam opens
+[DRY-RUN]   | ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="0e", TEST=="../power/control", ATTR{../power/control}="on"
+[DRY-RUN] chmod 0644 /etc/udev/rules.d/99-usb-autosuspend.rules
+[DRY-RUN] udevadm control --reload-rules
+[DRY-RUN] udevadm trigger --subsystem-match=usb --action=add
+[DRY-RUN] udevadm settle
+[DRY-RUN] udevadm trigger --subsystem-match=usb --property-match=DEVTYPE=usb_interface --action=bind
+[DRY-RUN] udevadm settle
+   USB runtime autosuspend rules deployed and applied to already-connected devices
+   (udev trigger replays 'add', then interface 'bind'; verify power/control).
+   Exempt: USB HID (keyboard/mouse/receivers), Bluetooth/wireless controllers,
+   USB audio (01) and UVC video (0e) — peripherals keep instant wake.
+== 17c. Browser Wayland Configuration (--with-browser-wayland) ==
+[DRY-RUN] install -d -m 0755 -o 1000 -g 1000 /home/node/.config
+   node: browser flag files written=0, not-installed=3, user-pinned-preserved=0
+[DRY-RUN] install -d -m 0755 -o 1001 -g 1001 /home/<user>/.config
+   user: browser flag files written=0, not-installed=3, user-pinned-preserved=0
+== 18. Non-destructive system status dashboard ==
+   Run at any time with:
+     sudo bash /home/<user>/vivobook-optimize/vivobook_optimize.sh --status
+   Alias:
+     sudo bash /home/<user>/vivobook-optimize/vivobook_optimize.sh --check
+   JSON:
+     sudo bash /home/<user>/vivobook-optimize/vivobook_optimize.sh --status-json
+== 19. Dynamic AC/Battery power switching (--with-auto-power) ==
+[DRY-RUN] apt-get -y -o Dpkg::Options::=--force-confold -o DPkg::Lock::Timeout=600 install iw
+[DRY-RUN] -> Write file: /usr/local/bin/vivobook-power-switch.sh (mode 0755)
+[DRY-RUN]   | #!/usr/bin/env bash
+[DRY-RUN]   | # Managed by vivobook_optimize.sh v16.1 --with-auto-power
+[DRY-RUN]   | set -Eeuo pipefail
+[DRY-RUN]   | 
+[DRY-RUN]   | # Debounce: adapter connect/disconnect fires multiple power_supply udev events
+[DRY-RUN]   | # within milliseconds. Hold an exclusive non-blocking lock so only one instance
+[DRY-RUN]   | # tunes at a time; later queued instances exit immediately. The lock fd is
+[DRY-RUN]   | # inherited by nothing long-lived; it is released when this script exits.
+[DRY-RUN]   | exec 9>/run/vivobook-power-switch.lock
+[DRY-RUN]   | flock -n 9 || exit 0
+[DRY-RUN]   | 
+[DRY-RUN]   | # v15.3 (I-25): every knob records what actually happened — applied,
+[DRY-RUN]   | # unsupported (<reason>) or failed. The summary at the end reports all of them,
+[DRY-RUN]   | # and the helper only fails when a writable node existed and every write to it
+[DRY-RUN]   | # was rejected.
+[DRY-RUN]   | declare -A KNOB_STATE=()
+[DRY-RUN]   | ANY_APPLIED=false
+[DRY-RUN]   | ANY_FAILED=false
+[DRY-RUN]   | 
+[DRY-RUN]   | # Shared read-only parsers/detection are emitted from the parent definitions.
+[DRY-RUN]   | AUDIO_CONF=/etc/modprobe.d/audio-powersave.conf
+[DRY-RUN]   | is_external_power_online () 
+[DRY-RUN]   | { 
+[DRY-RUN]   |     local root="${1:-/sys/class/power_supply}" supply type online seen=false;
+[DRY-RUN]   |     for supply in "$root"/*;
+[DRY-RUN]   |     do
+[DRY-RUN]   |         [[ -r "$supply/type" && -r "$supply/online" ]] || continue;
+[DRY-RUN]   |         type="$(cat "$supply/type" 2> /dev/null || true)";
+[DRY-RUN]   |         case "$type" in 
+[DRY-RUN]   |             Mains | USB | USB_PD | USB_C)
+[DRY-RUN]   |                 online="$(cat "$supply/online" 2> /dev/null || true)";
+[DRY-RUN]   |                 [[ "$online" == 1 ]] && return 0;
+[DRY-RUN]   |                 [[ "$online" == 0 ]] && seen=true
+[DRY-RUN]   |             ;;
+[DRY-RUN]   |         esac;
+[DRY-RUN]   |     done;
+[DRY-RUN]   |     [[ "$seen" == true ]] && return 1;
+[DRY-RUN]   |     return 2
+[DRY-RUN]   | }
+[DRY-RUN]   | audio_staged_options () 
+[DRY-RUN]   | { 
+[DRY-RUN]   |     [[ -f "$AUDIO_CONF" ]] || return 0;
+[DRY-RUN]   |     command sed -n -e 's/#.*$//' -e 's/^[[:space:]]*options[[:space:]]\{1,\}snd_hda_intel[[:space:]]\{1,\}//p' "$AUDIO_CONF" 2> /dev/null | tr -s '[:space:]' ' ' | command sed -e 's/^ //' -e 's/ $//'
+[DRY-RUN]   | }
+[DRY-RUN]   | audio_staged_opt () 
+[DRY-RUN]   | { 
+[DRY-RUN]   |     local key="$1" tok v="";
+[DRY-RUN]   |     for tok in $(audio_staged_options);
+[DRY-RUN]   |     do
+[DRY-RUN]   |         [[ "$tok" == "$key="* ]] && v="${tok#*=}";
+[DRY-RUN]   |     done;
+[DRY-RUN]   |     printf '%s\n' "$v"
+[DRY-RUN]   | }
+[DRY-RUN]   | battery_audio_timeout () 
+[DRY-RUN]   | { 
+[DRY-RUN]   |     local value;
+[DRY-RUN]   |     value="$(audio_staged_opt power_save)";
+[DRY-RUN]   |     value="${value#"${value%%[!0]*}"}";
+[DRY-RUN]   |     if [[ "$value" =~ ^[1-9][0-9]*$ ]] && (( ${#value} <= 10 )) && (( 10#$value <= 2147483647 )); then
+[DRY-RUN]   |         printf '%s\n' "$value";
+[DRY-RUN]   |     else
+[DRY-RUN]   |         printf '%s\n' 1;
+[DRY-RUN]   |     fi
+[DRY-RUN]   | }
+[DRY-RUN]   | 
+[DRY-RUN]   | AC=0
+[DRY-RUN]   | if is_external_power_online; then AC=1; fi
+[DRY-RUN]   | 
+[DRY-RUN]   | apply_epp() {
+[DRY-RUN]   |   local val="$1" target applied=false reported="" f nodes=0 applied_nodes=0 _try
+[DRY-RUN]   |   if command -v powerprofilesctl >/dev/null 2>&1 && systemctl is-active --quiet power-profiles-daemon.service; then
+[DRY-RUN]   |     case "$val" in
+[DRY-RUN]   |       performance)         target=performance ;;
+[DRY-RUN]   |       balance_power|power) target=power-saver ;;
+[DRY-RUN]   |       *)                   target=balanced ;;
+[DRY-RUN]   |     esac
+[DRY-RUN]   |     # v15.3 (I-04): retry, then read back. A swallowed failure is never
+[DRY-RUN]   |     # reported as applied.
+[DRY-RUN]   |     for _try in 1 2 3; do
+[DRY-RUN]   |       powerprofilesctl set "$target" >/dev/null 2>&1 || true
+[DRY-RUN]   |       reported="$(powerprofilesctl get 2>/dev/null || true)"
+[DRY-RUN]   |       if [[ "$reported" == "$target" ]]; then
+[DRY-RUN]   |         applied=true
+[DRY-RUN]   |         break
+[DRY-RUN]   |       fi
+[DRY-RUN]   |       sleep 1
+[DRY-RUN]   |     done
+[DRY-RUN]   |     if [[ "$applied" == true ]]; then
+[DRY-RUN]   |       KNOB_STATE[epp]="applied via power-profiles-daemon (PPD reports '$reported')"
+[DRY-RUN]   |       ANY_APPLIED=true
+[DRY-RUN]   |     else
+[DRY-RUN]   |       KNOB_STATE[epp]="failed via power-profiles-daemon (reports '${reported:-no value}', wanted '$target')"
+[DRY-RUN]   |       ANY_FAILED=true
+[DRY-RUN]   |     fi
+[DRY-RUN]   |     return 0
+[DRY-RUN]   |   fi
+[DRY-RUN]   |   for f in /sys/devices/system/cpu/cpufreq/policy*/energy_performance_preference; do
+[DRY-RUN]   |     [[ -e "$f" ]] || continue
+[DRY-RUN]   |     nodes=$((nodes + 1))
+[DRY-RUN]   |     if [[ -w "$f" ]] && { printf '%s\n' "$val" > "$f"; } 2>/dev/null; then
+[DRY-RUN]   |       applied_nodes=$((applied_nodes + 1))
+[DRY-RUN]   |     fi
+[DRY-RUN]   |   done
+[DRY-RUN]   |   if (( nodes == 0 )); then
+[DRY-RUN]   |     KNOB_STATE[epp]="unsupported (no energy_performance_preference nodes)"
+[DRY-RUN]   |   elif (( applied_nodes == 0 )); then
+[DRY-RUN]   |     KNOB_STATE[epp]="failed ($nodes node(s) present, every write rejected)"
+[DRY-RUN]   |     ANY_FAILED=true
+[DRY-RUN]   |   else
+[DRY-RUN]   |     KNOB_STATE[epp]="applied ($applied_nodes/$nodes policy node(s))"
+[DRY-RUN]   |     ANY_APPLIED=true
+[DRY-RUN]   |   fi
+[DRY-RUN]   |   return 0
+[DRY-RUN]   | }
+[DRY-RUN]   | 
+[DRY-RUN]   | apply_thermal() {
+[DRY-RUN]   |   local val="$1" p node saw=false
+[DRY-RUN]   |   # power-profiles-daemon owns the kernel platform profile: the powerprofilesctl
+[DRY-RUN]   |   # call in apply_epp already commands the matching profile. Writing
+[DRY-RUN]   |   # platform-profile sysfs here would desynchronize PPD's internal state
+[DRY-RUN]   |   # machine and reset desktop power UIs, so skip direct writes entirely while
+[DRY-RUN]   |   # PPD is active (not an error — PPD keeps platform profile in sync with EPP).
+[DRY-RUN]   |   if command -v powerprofilesctl >/dev/null 2>&1 &&
+[DRY-RUN]   |      systemctl is-active --quiet power-profiles-daemon.service; then
+[DRY-RUN]   |     # v15.3 (I-25): PPD keeps the platform profile in sync with the EPP profile
+[DRY-RUN]   |     # commanded above — a real result, not a silent skip.
+[DRY-RUN]   |     KNOB_STATE[thermal]="applied via power-profiles-daemon (profile follows PPD)"
+[DRY-RUN]   |     ANY_APPLIED=true
+[DRY-RUN]   |     return 0
+[DRY-RUN]   |   fi
+[DRY-RUN]   |   for node in /sys/class/platform_profile/*/profile /sys/firmware/acpi/platform_profile; do
+[DRY-RUN]   |     [[ -w "$node" ]] || continue
+[DRY-RUN]   |     saw=true
+[DRY-RUN]   |     if { printf '%s\n' "$val" > "$node"; } 2>/dev/null; then
+[DRY-RUN]   |       KNOB_STATE[thermal]="applied ($node)"
+[DRY-RUN]   |       ANY_APPLIED=true
+[DRY-RUN]   |       return 0
+[DRY-RUN]   |     fi
+[DRY-RUN]   |   done
+[DRY-RUN]   |   if [[ -w /sys/devices/platform/asus-nb-wmi/throttle_thermal_policy ]]; then
+[DRY-RUN]   |     saw=true
+[DRY-RUN]   |     case "$val" in
+[DRY-RUN]   |       balanced)    p=0 ;;
+[DRY-RUN]   |       performance) p=1 ;;
+[DRY-RUN]   |       quiet)       p=2 ;;
+[DRY-RUN]   |       *)           p="" ;;
+[DRY-RUN]   |     esac
+[DRY-RUN]   |     if [[ -n "$p" ]] &&
+[DRY-RUN]   |        { printf '%s\n' "$p" > /sys/devices/platform/asus-nb-wmi/throttle_thermal_policy; } 2>/dev/null; then
+[DRY-RUN]   |       KNOB_STATE[thermal]="applied (asus-nb-wmi throttle_thermal_policy=$p)"
+[DRY-RUN]   |       ANY_APPLIED=true
+[DRY-RUN]   |       return 0
+[DRY-RUN]   |     fi
+[DRY-RUN]   |   fi
+[DRY-RUN]   |   if [[ "$saw" == true ]]; then
+[DRY-RUN]   |     KNOB_STATE[thermal]="failed (interface present, every write rejected)"
+[DRY-RUN]   |     ANY_FAILED=true
+[DRY-RUN]   |   else
+[DRY-RUN]   |     KNOB_STATE[thermal]="unsupported (no writable platform profile interface)"
+[DRY-RUN]   |   fi
+[DRY-RUN]   |   return 0
+[DRY-RUN]   | }
+[DRY-RUN]   | 
+[DRY-RUN]   | # v15.3 (I-06): the global PCIe ASPM policy knob
+[DRY-RUN]   | # (/sys/module/pcie_aspm/parameters/policy) is deliberately NOT touched.
+[DRY-RUN]   | # It is unowned (no manager here claims it), unrecorded (no config file says
+[DRY-RUN]   | # what was written) and unrollbackable (--restore-defaults has no saved value
+[DRY-RUN]   | # to put back, and an operator may have chosen pcie_aspm.policy on the kernel
+[DRY-RUN]   | # cmdline). ASPM is precisely this platform's sensitive subsystem: the MT7902's
+[DRY-RUN]   | # behaviour is kernel-dependent (an optional per-device disable_aspm=1 fallback
+[DRY-RUN]   | # exists) and ASPM gates S0ix, so silently rewriting the global policy is the
+[DRY-RUN]   | # one thing that must not happen automatically.
+[DRY-RUN]   | 
+[DRY-RUN]   | apply_wifi_powersave() {
+[DRY-RUN]   |   local val="$1" iface flags nodes=0 applied=0
+[DRY-RUN]   |   if ! command -v iw >/dev/null 2>&1; then
+[DRY-RUN]   |     KNOB_STATE[wifi_powersave]="unsupported (iw is not installed)"
+[DRY-RUN]   |     return 0
+[DRY-RUN]   |   fi
+[DRY-RUN]   |   case "$val" in
+[DRY-RUN]   |     on|off) ;;
+[DRY-RUN]   |     *)
+[DRY-RUN]   |       KNOB_STATE[wifi_powersave]="unsupported (invalid value '$val')"
+[DRY-RUN]   |       return 0
+[DRY-RUN]   |       ;;
+[DRY-RUN]   |   esac
+[DRY-RUN]   |   while IFS= read -r iface; do
+[DRY-RUN]   |     [[ -n "$iface" && -r "/sys/class/net/$iface/flags" ]] || continue
+[DRY-RUN]   |     flags="$(cat "/sys/class/net/$iface/flags" 2>/dev/null || true)"
+[DRY-RUN]   |     [[ "$flags" =~ ^0x[[:xdigit:]]+$ ]] || continue
+[DRY-RUN]   |     (( flags & 1 )) || continue  # IFF_UP: never bring an inactive interface up.
+[DRY-RUN]   |     nodes=$((nodes + 1))
+[DRY-RUN]   |     if iw dev "$iface" set power_save "$val" >/dev/null 2>&1; then
+[DRY-RUN]   |       applied=$((applied + 1))
+[DRY-RUN]   |     fi
+[DRY-RUN]   |   done < <(iw dev 2>/dev/null | awk '$1 == "Interface" {print $2}' || true)
+[DRY-RUN]   |   if (( nodes == 0 )); then
+[DRY-RUN]   |     KNOB_STATE[wifi_powersave]="unsupported (no active wireless interface)"
+[DRY-RUN]   |   elif (( applied == 0 )); then
+[DRY-RUN]   |     KNOB_STATE[wifi_powersave]="failed ($nodes interface(s) present, every write rejected)"
+[DRY-RUN]   |     ANY_FAILED=true
+[DRY-RUN]   |   else
+[DRY-RUN]   |     KNOB_STATE[wifi_powersave]="applied ($applied/$nodes interface(s))"
+[DRY-RUN]   |     ANY_APPLIED=true
+[DRY-RUN]   |   fi
+[DRY-RUN]   |   return 0
+[DRY-RUN]   | }
+[DRY-RUN]   | 
+[DRY-RUN]   | apply_audio_powersave() {
+[DRY-RUN]   |   local val="$1" node=/sys/module/snd_hda_intel/parameters/power_save
+[DRY-RUN]   |   # v15.3 (I-25): if snd_hda_intel is not loaded the node does not exist. That
+[DRY-RUN]   |   # is 'unsupported', and the old code called it applied anyway.
+[DRY-RUN]   |   # v16 (change 6): on the reference machine snd_hda_intel IS loaded alongside
+[DRY-RUN]   |   # Intel SOF and exposes power_save, so this knob is normally applied there.
+[DRY-RUN]   |   if [[ ! -e "$node" ]]; then
+[DRY-RUN]   |     KNOB_STATE[audio_powersave]="unsupported (snd_hda_intel power_save not exposed)"
+[DRY-RUN]   |     return 0
+[DRY-RUN]   |   fi
+[DRY-RUN]   |   if [[ ! -w "$node" ]]; then
+[DRY-RUN]   |     KNOB_STATE[audio_powersave]="unsupported (power_save not writable)"
+[DRY-RUN]   |     return 0
+[DRY-RUN]   |   fi
+[DRY-RUN]   |   if { printf '%s\n' "$val" > "$node"; } 2>/dev/null; then
+[DRY-RUN]   |     KNOB_STATE[audio_powersave]="applied ($val)"
+[DRY-RUN]   |     ANY_APPLIED=true
+[DRY-RUN]   |   else
+[DRY-RUN]   |     KNOB_STATE[audio_powersave]="failed (write to power_save rejected)"
+[DRY-RUN]   |     ANY_FAILED=true
+[DRY-RUN]   |   fi
+[DRY-RUN]   |   return 0
+[DRY-RUN]   | }
+[DRY-RUN]   | 
+[DRY-RUN]   | if [[ "$AC" == "1" ]]; then
+[DRY-RUN]   |   # On AC: maximum sustained performance within firmware/thermal limits.
+[DRY-RUN]   |   POWER_LABEL="AC"
+[DRY-RUN]   |   apply_epp "performance"
+[DRY-RUN]   |   apply_thermal "performance"
+[DRY-RUN]   |   apply_wifi_powersave "off"
+[DRY-RUN]   |   apply_audio_powersave 0
+[DRY-RUN]   | else
+[DRY-RUN]   |   # On battery: EPP-driven power saving; no hard CPU/iGPU frequency ceilings,
+[DRY-RUN]   |   # RAPL overrides, backlight caps, or writeback delays (HWP race-to-sleep and
+[DRY-RUN]   |   # GuC SLPC govern CPU/GPU clocks natively).
+[DRY-RUN]   |   POWER_LABEL="battery"
+[DRY-RUN]   |   apply_epp "balance_power"
+[DRY-RUN]   |   apply_thermal "balanced"
+[DRY-RUN]   |   apply_wifi_powersave "on"
+[DRY-RUN]   |   apply_audio_powersave "$(battery_audio_timeout)"
+[DRY-RUN]   | fi
+[DRY-RUN]   | 
+[DRY-RUN]   | # v15.3 (I-25): report every knob's real state in one line, and fail the unit
+[DRY-RUN]   | # only when something writable was present and every write to it was rejected.
+[DRY-RUN]   | echo "vivobook-power-switch v16.1: $POWER_LABEL — epp=${KNOB_STATE[epp]:-unknown} | thermal=${KNOB_STATE[thermal]:-unknown} | wifi_powersave=${KNOB_STATE[wifi_powersave]:-unknown} | audio_powersave=${KNOB_STATE[audio_powersave]:-unknown}"
+[DRY-RUN]   | if [[ "$ANY_FAILED" == true && "$ANY_APPLIED" != true ]]; then
+[DRY-RUN]   |   echo "vivobook-power-switch v16.1: a writable control existed but every write to it failed." >&2
+[DRY-RUN]   |   exit 1
+[DRY-RUN]   | fi
+[DRY-RUN] chmod 0755 /usr/local/bin/vivobook-power-switch.sh
+[DRY-RUN] -> Write file: /etc/udev/rules.d/99-vivobook-power.rules (mode 0644)
+[DRY-RUN]   | # Managed by vivobook_optimize.sh v16.1 --with-auto-power
+[DRY-RUN]   | # SYSTEMD_WANTS alone does not restart an already-active oneshot service.
+[DRY-RUN]   | # Queue a nonblocking restart on every adapter change; run tuning in systemd,
+[DRY-RUN]   | # never a long-running helper inside the udev worker.
+[DRY-RUN]   | ACTION=="change", SUBSYSTEM=="power_supply", ATTR{online}=="?*", TAG+="systemd", RUN+="/usr/bin/systemctl --no-block restart vivobook-power-switch.service"
+[DRY-RUN] -> Install systemd unit: /etc/systemd/system/vivobook-power-switch.service (mode 0644)
+[DRY-RUN]   | # Managed by vivobook_optimize.sh v16.1
+[DRY-RUN]   | [Unit]
+[DRY-RUN]   | Description=Set ASUS Vivobook v16.1 AC/battery power profile
+[DRY-RUN]   | After=basic.target asus-thermal-profile.service intel-epp-profile.service rapl-power-limits.service
+[DRY-RUN]   | After=NetworkManager.service systemd-sysctl.service
+[DRY-RUN]   | # v15.3 (I-05): ordering only, no Wants= (ignored when PPD is absent).
+[DRY-RUN]   | After=power-profiles-daemon.service
+[DRY-RUN]   | # Adapter plug/unplug produces a burst of udev-triggered restarts; never
+[DRY-RUN]   | # rate-limit this service into a StartLimitBurst failure state.
+[DRY-RUN]   | StartLimitIntervalSec=0
+[DRY-RUN]   | ConditionPathExists=/usr/local/bin/vivobook-power-switch.sh
+[DRY-RUN]   | 
+[DRY-RUN]   | [Service]
+[DRY-RUN]   | Type=oneshot
+[DRY-RUN]   | ExecStart=/usr/local/bin/vivobook-power-switch.sh
+[DRY-RUN]   | RemainAfterExit=true
+[DRY-RUN]   | 
+[DRY-RUN]   | [Install]
+[DRY-RUN]   | WantedBy=multi-user.target
+[DRY-RUN] systemctl daemon-reload
+[DRY-RUN] systemctl enable vivobook-power-switch.service
+[DRY-RUN] -> Write file: /usr/lib/systemd/system-sleep/vivobook-power-switch (mode 0755)
+[DRY-RUN]   | #!/usr/bin/env bash
+[DRY-RUN]   | # Managed by vivobook_optimize.sh v16.1
+[DRY-RUN]   | # Re-applies vivobook-power-switch.service after resume, but only while that unit is enabled:
+[DRY-RUN]   | # a deliberately disabled unit is never started behind the admin's back.
+[DRY-RUN]   | if [[ "${1:-}" == post ]] && systemctl is-enabled --quiet vivobook-power-switch.service 2>/dev/null; then
+[DRY-RUN]   |   systemctl restart vivobook-power-switch.service >/dev/null 2>&1 || true
+[DRY-RUN]   | fi
+[DRY-RUN] udevadm control --reload-rules
+[DRY-RUN] systemctl restart vivobook-power-switch.service
+   Dynamic power switching enabled: boot service + udev rule installed.
+   Changes apply immediately on AC plug/unplug events.
+   AC requests: performance EPP/thermal, Wi-Fi power save off.
+   Battery requests: balance_power EPP (power-saver via PPD), balanced thermal, Wi-Fi power save on.
+   Profiles apply via power-profiles-daemon when active; PPD then also owns
+   the platform profile (direct sysfs thermal writes are skipped in that case).
+   Without PPD, profiles apply via sysfs directly. Audio power_save: 0 (AC) / 1 (battery)
+   where snd_hda_intel exposes it — on the reference machine it is exposed alongside
+   Intel SOF; the helper reports applied/unsupported per run.
+   The helper prints a per-knob state line (applied / unsupported / failed) and only
+   fails when a writable control existed and every write to it was rejected.
+   No CPU/iGPU frequency clamps, RAPL overrides, backlight changes, or writeback changes.
+   The global PCIe ASPM policy is not written: it is unowned, unrecorded and
+   unrollbackable, and ASPM is this platform's sensitive subsystem.
+   Unsupported/firmware-locked controls are skipped; other power managers may override runtime settings.
+== 20. Intel RAPL power limits (--pl1 / --pl2) ==
+   Not requested. Use --pl1=WATTS --pl2=WATTS to manage specific limits.
+   Providing only one value manages only that constraint; the other stays firmware-controlled.
+== 21. NVMe I/O scheduler (kernel default) ==
+[DRY-RUN] udevadm control --reload-rules
+   NVMe I/O scheduler left at the kernel default ('none' for multiqueue NVMe).
+   Managed udev rule removed if present.
+   To verify: cat /sys/block/nvme*/queue/scheduler
+== 22. Video Acceleration Environment (deprecated) ==
+   /etc/environment.d/99-vivobook-vaapi.conf removed if script-managed and present.
+   VA-API driver selection and Firefox protocol handling are left to upstream defaults.
+== 23. Keyboard backlight inactivity timeout (--with-kbd-timeout) ==
+   Skipped. Re-run with --with-kbd-timeout to enable keyboard backlight auto-off.
+[DRY-RUN] Append v16.1 run summary to /var/log/vivobook-optimize.log
+
+====================================================
+Done — ASUS Vivobook Optimization Pass v16.1.
+Flags this run:
+  guc=false
+  auto-upgrade=false maintenance-schedule=weekly
+  multiverse=false battery-limit=off
+  sysctl=true audio-powersave=true
+  fan-profile=unchanged epp=unchanged
+  zram=false
+  auto-power=true pl1=unchanged pl2=unchanged
+  kbd-timeout=false
+  bbr=false browser-wayland=true
+  usb-autosuspend=true disable-ppd=false
+  mt7921e-aspm=false
+  force-tlp-override=false
+  dry-run=true
+  skip-update=true full-upgrade=false
+
+Also reboot to apply: CPU microcode (if its version changed this run);
+staged snd_hda_intel boot options (audio-powersave.conf) — they apply only at the
+next module load (step 12 writes the file only on the legacy HDA path; with Intel
+SOF it stages nothing); unloading of module parameters staged by earlier script
+versions (i915/iwlwifi, if any); and staged fwupd firmware updates (if
+--with-auto-upgrade applied any).
+thermald, VA-API packages, fstrim.timer, sysctl tuning, battery threshold,
+thermal profile, EPP, zRAM, dynamic power switching, RAPL limits, keyboard
+backlight timeout, and the maintenance timer are active now when requested
+and supported (VA-API: restart already-running apps to pick it up).
+
+Verify after reboot:
+  sudo fwupdmgr get-devices
+  vainfo                       # run as your normal user, not root/sudo
+  sudo dmesg | grep -iE 'GuC|HuC|microcode'
+  systemctl list-timers
+  journalctl -u system-maintenance.service
+  sysctl vm.swappiness fs.inotify.max_user_watches kernel.nmi_watchdog vm.dirty_writeback_centisecs
+  cat /sys/module/snd_hda_intel/parameters/power_save   # live value; exposed alongside SOF here
+  cat /sys/module/mt7921e/parameters/disable_aspm
+  sudo bash /home/<user>/vivobook-optimize/vivobook_optimize.sh --safe-mode-check              # boot-integrity gate (Wi-Fi item informational)
+  cat /sys/class/power_supply/BAT*/charge_control_end_threshold
+  systemctl status battery-charge-threshold.service
+  cat /sys/firmware/acpi/platform_profile
+  cat /sys/devices/system/cpu/cpufreq/policy*/energy_performance_preference
+  cat /sys/power/mem_sleep
+  sudo cat /sys/kernel/debug/pmc_core/package_cstate_show
+  swapon --show
+  cat /sys/class/powercap/intel-rapl*/name
+  cat /sys/block/nvme*/queue/scheduler
+  cat /sys/class/leds/asus::kbd_backlight/stop_time
+  sudo bash /home/<user>/vivobook-optimize/vivobook_optimize.sh --status
+====================================================
+=== END DRY RUN — no files were modified. ===

@@ -1,0 +1,24 @@
+PASS bash -n (all project shell scripts)
+PASS shellcheck
+PASS --help
+vivobook_optimize.sh version 16.1 (JSON schema 3)
+PASS --status
+PASS --status-json | jq . and schema-3 additive keys
+PASS A-01 migration, exact deduplication, repeat-run identity, restore preserves custom data
+PASS A-01 unowned/conflicting destination refuses migration without source loss
+PASS A-03 all four frequency names and fallback after invalid cur_freq
+PASS A-07 offline first supply, all four online types, offline/unknown states
+PASS A-04 staged timeout parsing, fallback, enabled override, controller-only mismatch
+PASS A-06 target-only cleanup, custom flags preserved, installed pinned Brave unchanged
+PASS A-04/A-05 generated helper and guarded hook: bash -n + shellcheck
+PASS A-03/A-07 dashboard and JSON callers use current-frequency/power helpers
+PASS A-08 legacy thermal choices and present keyboard without stop_time keys
+PASS A-08 orphan cleanup without unit/battery sysfs, unowned helper preserved
+PASS A-03 current telemetry independent of max-frequency availability
+PASS A-05 generated hook: disabled post and enabled pre do not restart; enabled post restarts
+PASS ownership qualification: default cleanup preserves unmarked legacy-looking i915 config
+PASS A-01 atomic_write refuses partial stdin in conditional/restore context
+PASS A-01/A-08 ownership: symlink to a marked file is preserved
+PASS A-08 live threshold reset after discovery
+PASS cleanup --help / --dry-run
+PASS smoke tests (hardware mutation intentionally not tested)
