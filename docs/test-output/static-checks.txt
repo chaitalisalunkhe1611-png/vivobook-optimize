@@ -1,0 +1,20 @@
+$ bash --version (first line)
+GNU bash, version 5.2.15(1)-release (x86_64-pc-linux-gnu)
+$ shellcheck --version
+ShellCheck - shell script analysis tool
+version: 0.11.0
+license: GNU General Public License, version 3
+website: https://www.shellcheck.net
+$ jq --version
+jq-1.6
+
+$ for file in project shell scripts; do bash -n "$file"; done
+PASS bash -n vivobook_optimize.sh
+PASS bash -n vivobook_optimize_v16.1.sh
+PASS bash -n tools/cleanup-v16.0-drift.sh
+PASS bash -n tests/smoke.sh
+PASS bash -n tests/regression.sh
+
+$ shellcheck vivobook_optimize.sh vivobook_optimize_v16.1.sh tools/*.sh tests/*.sh
+shellcheck exit=0 (no diagnostics)
+cmp canonical/versioned exit=0

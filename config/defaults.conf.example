@@ -1,0 +1,28 @@
+# Example: /etc/vivobook-optimize/defaults.conf
+# Reference X1605VA configuration from the supplied audit Step 2, NOT defaults.
+# This file is sourced as shell code (including for read-only invocations).
+# Keep it root-owned, mode 0644; never source untrusted downloaded settings.
+# CLI arguments are parsed afterward and take precedence.
+
+# Compressed swap: zstd, min(ram / 2, 8192) MiB, priority 100.
+WITH_ZRAM=true
+# Dynamic AC/battery EPP, thermal, Wi-Fi and HDA power_save; refuses active TLP.
+WITH_AUTO_POWER=true
+# Reference machine: PL1 is firmware-locked at 200 W. Leave PL1 unspecified.
+# PL2=45 is NOT a universal recommendation; verify your actual hardware.
+PL2=45
+# Firmware keyboard backlight timeout (30s), only if supported.
+WITH_KBD_TIMEOUT=true
+# TCP BBR with fq (kernel support required).
+WITH_BBR=true
+# Ozone auto-detection; installed Chromium-based browsers only.
+WITH_BROWSER_WAYLAND=true
+# USB autosuspend; HID/BT/audio/video exempt on interface add and bind.
+WITH_USB_AUTOSUSPEND=true
+# Maintenance timer: no unattended package upgrades, kernel purge or flashing.
+MAINTENANCE_SCHEDULE=weekly
+# Native MT7902 ASPM is stable in the supplied kernel-7.2.6 snapshot.
+# Optional disable_aspm=1 fallback is deliberately NOT requested.
+WITH_MT7921E_ASPM=false
+# No BATTERY_LIMIT assignment: omission leaves any existing cap unchanged.
+# To remove an earlier cap, explicitly run --battery-limit=off once.

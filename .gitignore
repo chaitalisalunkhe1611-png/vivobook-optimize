@@ -1,0 +1,15 @@
+# Private host state / generated local test artifacts (published reports are explicit).
+*.log
+*.bak
+*.orig
+*.tmp
+*.zip
+*.pem
+*.priv
+*.key
+.env
+.venv/
+.cache/
+__pycache__/
+backups/
+artifacts/

@@ -1,0 +1,152 @@
+ASUS Vivobook 16 (X1605VA) — Optimization Pass v16.1
+i5-13420H (Raptor Lake-H, 4P+4E) / Intel UHD iGPU / 16GB DDR4 / Micron NVMe
+
+v16.1 — audit fixes A-01..A-08; flags/defaults unchanged, JSON schema 3.
+Preserve custom sysctls, USB bind exemptions, xe current frequency, dynamic
+audio/resume policy, stale-browser cleanup, shared power detection, JSON shape.
+
+v16.0 — drift-correction release. NO new flags, services or managed files.
+Baseline: kernel 7.2.6, S0ix functional, mt7921e ASPM workaround removed,
+PL1 firmware-locked (200 W), PL2=45 W, no charge cap. Changes:
+ 1 --safe-mode-check: mt7921e item is informational (live disable_aspm and
+   config shown separately; WARN, exit 0, only on kernel-log errors)
+ 2 ASPM-workaround wording is state-driven; --with-mt7921e-aspm is an
+   OPTIONAL fallback; JSON adds aspm_workaround_live
+ 3 version 16.0, JSON schema 3 (additive keys; i915.module follows the bound
+   driver); generated headers say v16 (one-time rewrite on the first run)
+ 4 --status/--status-json are read-only: no RAPL write-back lock probe
+   (probe kept only in the mutating --pl1/--pl2 path)
+ 5 --restore-defaults is ownership-aware: only marker-owned (or v15.3
+   legacy-rule) units/helpers/hooks/defaults/udev rules are removed;
+   unmarked paths are preserved and listed
+ 6 audio: a marked audio-powersave.conf with hand-edited options is kept on
+   the SOF path; [HD Audio power save] status + "audio" JSON (staged vs live)
+ 7 sleep hooks restart a unit only while it is enabled; existing managed
+   hooks are refreshed in place; status shows enabled/installed-disabled/
+   not-installed and flags unguarded v15.3 hooks
+ 8 --safe-mode-check also verifies the newest installed /boot/vmlinuz-*
+ 9 status/JSON report the BOUND DRM driver (xe), not a merely loaded i915
+10 PC6 + validated S0i2/S0i3 substate residency (else "unavailable")
+11 battery health falls back to energy_full/energy_full_design (uWh)
+12 unmanaged sysctl files that also set managed keys are reported (never
+   edited), e.g. /etc/sysctl.d/99-bbr.conf re-applying BBR after restore
+13 --battery-limit=off reports what actually happened
+14 dry-run / summary flag echo include mt7921e-aspm
+15 read-only USB exempt-class power/control diagnostic (MISMATCH on auto)
+
+v15.3 — correctness/completeness release (new flags: --with-mt7921e-aspm,
+--version, --safe-mode-check). Fixes: I-01 per-constraint RAPL lock probe;
+I-02 live-firmware PL2 check; I-03 MT7902 ASPM workaround; I-04 PPD read-back;
+I-05 PPD thermal/EPP conflict refused; I-06 global ASPM write removed;
+I-07 zram detach on restore; I-08 BBR live reset; I-09 battery restore
+count; I-10/I-11 honest dry-run probes; I-12 banner last; I-13 no-op
+atomic_write; I-14 timer restart only on change; I-15 headers-base purge;
+I-16/I-17 marker enforcement; I-18 unit/hook markers; I-19/I-20 identity +
+integrity status, stable JSON schema, --version; I-21 xe iGPU freq layout;
+I-22 ASPM-aware C-states; I-23 redirect-ordering leak; I-24 here-string
+zram write; I-25 auto-power knob accounting; I-26/I-27 browser flags
+preserved + install detection; I-28 dry-run prompts, /boot note;
+I-29..I-33 doc/dead-code annotations; I-34 --safe-mode-check gate.
+
+Usage:
+  sudo bash vivobook_optimize.sh                                    safe defaults only
+  sudo bash vivobook_optimize.sh --with-guc                         diagnose i915 GuC/HuC state only, no changes
+  sudo bash vivobook_optimize.sh --with-auto-upgrade                apply available fwupd firmware updates during the
+                                                               supervised step-2 run (the background timer never
+                                                               upgrades packages, flashes firmware, or prunes kernels)
+  sudo bash vivobook_optimize.sh --with-multiverse                  non-interactively enable Ubuntu multiverse if the
+                                                               non-free Intel VA-API driver is unavailable
+  sudo bash vivobook_optimize.sh --with-battery-limit               cap battery charge at 80% (asus_wmi)
+  sudo bash vivobook_optimize.sh --battery-limit=N                  cap battery charge at N% (20-100)
+  sudo bash vivobook_optimize.sh --battery-limit=off                remove the charge cap (restore 100%)
+  sudo bash vivobook_optimize.sh --maintenance-schedule=weekly
+  sudo bash vivobook_optimize.sh --maintenance-schedule=monthly
+  sudo bash vivobook_optimize.sh --fan-profile=quiet
+  sudo bash vivobook_optimize.sh --fan-profile=balanced
+  sudo bash vivobook_optimize.sh --fan-profile=performance
+  sudo bash vivobook_optimize.sh --epp=performance
+  sudo bash vivobook_optimize.sh --epp=balance_performance
+  sudo bash vivobook_optimize.sh --epp=balance_power
+  sudo bash vivobook_optimize.sh --epp=power
+  sudo bash vivobook_optimize.sh --with-zram
+  sudo bash vivobook_optimize.sh --with-auto-power                  dynamic AC/battery profile switching (udev + service)
+                                                               AC: performance EPP/thermal, Wi-Fi/audio saving off
+                                                               Battery: balance_power/power-saver EPP, balanced
+                                                               thermal, Wi-Fi/audio saving on
+                                                               Profiles apply via power-profiles-daemon when active,
+                                                               else via sysfs; no CPU/iGPU frequency clamps, no RAPL
+                                                               overrides, no backlight or writeback manipulation
+                                                               (HWP/GuC SLPC/kernel defaults retained)
+                                                               Overrides static EPP/thermal when switching; dynamic
+                                                               audio applies even with --no-audio-powersave (that
+                                                               skips the static config only)
+  sudo bash vivobook_optimize.sh --pl1=WATTS                        manage Intel RAPL PL1 sustained limit (watts).
+  sudo bash vivobook_optimize.sh --pl2=WATTS                        manage Intel RAPL PL2 burst limit (watts).
+                                                               If only one is given, ONLY that constraint is
+                                                               managed; the other stays under firmware control
+                                                               and is never invented. Requests are validated
+                                                               against the live hardware envelope (PL1 <= PL2)
+                                                               and against constraint maxima where exposed.
+  sudo bash vivobook_optimize.sh --with-kbd-timeout                 auto-dim keyboard backlight after 30s idle
+  sudo bash vivobook_optimize.sh --with-bbr                         enable TCP BBR congestion control + FQ qdisc
+  sudo bash vivobook_optimize.sh --with-browser-wayland               configure Ozone platform auto-detection for Wayland browsers
+                                                               (--with-browser-vaapi remains a compatibility alias)
+  sudo bash vivobook_optimize.sh --with-mt7921e-aspm                OPTIONAL fallback: stage the MediaTek MT7902 (mt7921e)
+                                                               ASPM workaround /etc/modprobe.d/mt7921e.conf with
+                                                               'options mt7921e disable_aspm=1'. Use it only if the
+                                                               Wi-Fi link is actually unstable on your kernel. It
+                                                               blocks PCIe L1.x on the Wi-Fi link; on the reference
+                                                               machine it kept PC6/PC8/S0i3 at 0 until it was removed
+                                                               on kernel 7.2.6 (Wi-Fi stable without it). Needs a
+                                                               reboot (no initramfs rebuild). Unmanaged files are
+                                                               never overwritten. Not gated by TLP.
+  sudo bash vivobook_optimize.sh --with-usb-autosuspend             enable USB runtime autosuspend (exempting USB HID,
+                                                               Bluetooth/wireless controllers, USB audio class 01
+                                                               and UVC video class 0e)
+  sudo bash vivobook_optimize.sh --disable-ppd                      mask power-profiles-daemon to prevent EPP conflicts
+  sudo bash vivobook_optimize.sh --force-tlp-override               allow script-managed power policy steps (audio
+                                                               power_save defaults, ASUS charge threshold,
+                                                               thermal platform profile, CPU EPP, USB
+                                                               autosuspend) even while TLP is active.
+                                                               NOT recommended: two managers then write the
+                                                               same knobs. --with-auto-power ALWAYS refuses
+                                                               to run under TLP regardless of this flag.
+  bash vivobook_optimize.sh --dry-run                               parse arguments and print actions without modifying
+                                                               the system (root not required)
+  sudo bash vivobook_optimize.sh --restore-defaults                 remove every script-managed service, unit, helper,
+                                                               hook and config file; detach the managed zram swap
+                                                               device; restore battery/max_perf_pct to 100%; reset
+                                                               swappiness/writeback and the live BBR congestion
+                                                               control value, then reapply distro sysctls. Module
+                                                               options and RAPL need a reboot to take effect. It is
+                                                               NOT an undo of the kernel cmdline, BIOS settings or
+                                                               distro packages.
+  bash vivobook_optimize.sh --status                                read-only system status dashboard (sudo optional;
+                                                               more detail, e.g. C-state residency, when run as root)
+  bash vivobook_optimize.sh --check                                 alias for --status
+  bash vivobook_optimize.sh --status-json                           machine-readable system telemetry (sudo optional)
+  bash vivobook_optimize.sh --safe-mode-check                       read-only boot-integrity gate. Hard gates: kernel
+                                                               signing hook, stock-kernel pin, running-kernel
+                                                               signature and Secure Boot; exits 1 listing anything
+                                                               missing — do not reboot until they are resolved.
+                                                               The mt7921e Wi-Fi item is INFORMATIONAL: it shows the
+                                                               live disable_aspm value and the config state, and
+                                                               WARNs (exit still 0) only when mt7921e errors appear
+                                                               in this boot's kernel log
+  bash vivobook_optimize.sh --version                               print script name, version and JSON schema; exit 0
+  sudo bash vivobook_optimize.sh --skip-update                      skip steps 1-3 (rapid configuration pass)
+  sudo bash vivobook_optimize.sh --with-full-upgrade                use apt-get full-upgrade instead of upgrade
+  sudo bash vivobook_optimize.sh --no-sysctl                        skip /etc/sysctl.d/99-vivobook.conf tuning
+  sudo bash vivobook_optimize.sh --no-audio-powersave               skip snd_hda_intel power_save configuration
+  sudo bash vivobook_optimize.sh -h                                 show this usage
+
+Defaults: /etc/vivobook-optimize/defaults.conf is sourced before CLI parsing,
+so command-line arguments take precedence.
+
+Safe to re-run. Flags mostly additive (guc/battery/profile/EPP/zRAM/
+auto-power/kbd/bbr/browser/usb units and files aren't removed by omitting
+the flag later; use --battery-limit=off to undo the charge cap, or
+--restore-defaults to tear down ALL managed configs).
+--maintenance-schedule reflects only the MOST RECENT run, since step 10
+regenerates the maintenance script and timer.
+

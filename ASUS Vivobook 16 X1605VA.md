@@ -11,10 +11,10 @@ Everything below reflects the current state of the machine as of October 10, 202
 | Manufacturer | ASUSTeK COMPUTER INC. |
 | Model | Vivobook_ASUSLaptop X1605VA_X1605VA |
 | Product version | 1.0 |
-| Serial number | T3N0CV037093108 |
-| Product UUID | 2af0ed40-2676-8544-8698-db287756d0f1 |
-| Machine ID | ecdd51fcd75a42ed81f84318f31f0990 |
-| Hostname | chaitu-Vivobook-ASUSLaptop-X1605VA-X1605VA |
+| Serial number | <serial> |
+| Product UUID | <UUID> |
+| Machine ID | <machine-id> |
+| Hostname | <hostname> |
 | Chassis | Laptop |
 | Board | ASUS X1605VA |
 | BIOS | X1605VA.313 (2025-05-21) |
@@ -114,7 +114,7 @@ Everything below reflects the current state of the machine as of October 10, 202
 | Firmware | V8MA000 |
 | NVMe version | 1.4 |
 | PCI vendor | 0x1344 |
-| Serial | 24504CD931D6 |
+| Serial | <serial> |
 | I/O scheduler | [none] mq-deadline |
 | nr_requests | 1023 |
 
@@ -157,9 +157,9 @@ Everything below reflects the current state of the machine as of October 10, 202
 | Config file | **None in /etc/modprobe.d/** |
 | Backup location | /root/vivobook-backups/modprobe/mt7921e.conf.disabled |
 | Interface | wlo1 |
-| MAC | a8:e2:91:c4:5c:fc |
+| MAC | <MAC> |
 | Wi-Fi generation | 802.11ax (Wi-Fi 6E) |
-| Current SSID | chaitali's M55 |
+| Current SSID | <SSID> |
 | Channel | 149 (5745 MHz, 80 MHz) |
 | Firmware build | 20251212032127 |
 | Power save | off (on AC) |
@@ -179,13 +179,13 @@ Everything below reflects the current state of the machine as of October 10, 202
 **Paired devices (still present):**
 | MAC | Name |
 |---|---|
-| 66:38:A3:37:AC:83 | (unnamed) |
-| 30:B9:30:55:C3:6C | (unnamed) |
-| 5D:2F:CA:2C:B9:92 | (unnamed) |
-| 45:B5:DC:B7:28:04 | Airdopes 161 |
-| EF:88:09:C1:1D:F1 | Portronics Muffs M4 |
-| 3D:BE:40:EA:60:DA | Airdopes 161 |
-| B8:16:5F:B8:42:DD | Aarush's TV |
+| <MAC> | (unnamed) |
+| <MAC> | (unnamed) |
+| <MAC> | (unnamed) |
+| <MAC> | Airdopes 161 |
+| <MAC> | Portronics Muffs M4 |
+| <MAC> | Airdopes 161 |
+| <MAC> | <user>'s TV |
 
 **Combined Bluetooth sink:** Removed (config deleted, PipeWire restarted).
 
@@ -267,8 +267,8 @@ Everything below reflects the current state of the machine as of October 10, 202
 | Kernel signature | CN=Vivobook Kernel Key |
 | Secure Boot | enabled |
 | Shell | zsh |
-| User | chaitu (UID 1000) |
-| Home | /home/chaitu |
+| User | <user> (UID 1000) |
+| Home | /home/<user> |
 
 ---
 
@@ -276,7 +276,7 @@ Everything below reflects the current state of the machine as of October 10, 202
 
 **/proc/cmdline:**
 ```
-BOOT_IMAGE=/boot/vmlinuz-7.2.6-070206-generic root=UUID=59c6eb3b-6049-4678-87f9-7d6fb28c102b ro quiet splash i915.force_probe=!a7a8 xe.force_probe=a7a8 crashkernel=...
+BOOT_IMAGE=/boot/vmlinuz-7.2.6-070206-generic root=UUID=<UUID> ro quiet splash i915.force_probe=!a7a8 xe.force_probe=a7a8 crashkernel=...
 ```
 
 **Boot images:** vmlinuz-7.2.6, initrd.img-7.2.6, mt86+x64, mt86+ia32
@@ -293,9 +293,9 @@ BOOT_IMAGE=/boot/vmlinuz-7.2.6-070206-generic root=UUID=59c6eb3b-6049-4678-87f9-
 | 3 | Vivobook Kernel Key |
 
 **MOK key files:**
-- /root/mok/MOK.der, MOK.pem, MOK.priv (active)
-- /root/MOK.der (Custom Kernel Signing Key)
-- /root/mok-backup/MOK.{der,priv}
+- /root/<private-key-path>, MOK.pem, MOK.priv (active)
+- /root/<private-key-path> (Custom Kernel Signing Key)
+- /root/<private-key-path>,priv}
 
 **Latest kernel available:** 7.2.6 (no newer in PPA)
 
@@ -413,8 +413,8 @@ PL2=45
 
 | Field | Value |
 |---|---|
-| IPv4 (wlo1) | 10.79.62.55/24 |
-| Broadcast | 10.79.62.255 |
+| IPv4 (wlo1) | <private-ip>/24 |
+| Broadcast | <broadcast-ip> |
 | Loopback | 127.0.0.1/8 |
 | DHCP | Active on wlo1 |
 | TCP congestion | bbr |
@@ -437,7 +437,7 @@ PL2=45
 **Rules:**
 | Rule | Action | From |
 |---|---|---|
-| 22/tcp | ALLOW IN | 10.79.62.0/24 |
+| 22/tcp | ALLOW IN | <private-subnet>/24 |
 
 ---
 
@@ -596,7 +596,7 @@ PL2=45
 | Kernel signing | MOK `CN=Vivobook Kernel Key` |
 | Signing hook | present, executable |
 | UFW | active, deny incoming |
-| SSH | LAN only (10.79.62.0/24) |
+| SSH | LAN only (<private-subnet>/24) |
 | AppArmor | enabled (134 unconfined processes) |
 | Lynis | 76/100 |
 | AIDE | installed |
@@ -624,7 +624,7 @@ PL2=45
 | Hot corners | disabled |
 | Clock | 12h, weekday shown |
 | Button layout | appmenu:minimize,maximize,close |
-| Wallpaper | /home/chaitu/Pictures/Wallpapers/vr592-wallpaper.cam.jpg |
+| Wallpaper | /home/<user>/<personal-path> |
 | Display | N160JCE-ELL (Chi Mei), 1920×1200 (16:10) |
 
 ---

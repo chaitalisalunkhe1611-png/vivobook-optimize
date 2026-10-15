@@ -1,0 +1,33 @@
+====================================================
+ASUS Vivobook v16.1 — safe-mode / boot-integrity check
+Generated: Thu Oct 15 11:14:21 UTC 2026
+Host: unavailable / BIOS unavailable
+Kernel: 6.1.158+
+====================================================
+
+[1/5] Kernel signing hook
+  FAIL  /etc/kernel/postinst.d/zz-sign-kernel is missing — a newly installed kernel would not be
+        signed and Secure Boot would refuse it.
+
+[2/5] Stock-kernel apt pin
+  FAIL  /etc/apt/preferences.d/block-stock-kernel.pref is missing; a stock kernel update could replace
+        the mainline kernel and Wi-Fi support with it.
+
+[3/5] Kernel image signatures (running: /boot/vmlinuz-6.1.158+)
+  FAIL  /boot/vmlinuz-6.1.158+ not found.
+
+[4/5] Secure Boot
+  UNVERIFIED  neither mokutil nor efivarfs reported a Secure Boot state.
+              Install mokutil to make this item verifiable.
+
+[5/5] MediaTek MT7902 (mt7921e) Wi-Fi link (informational — never fails this gate)
+  N/A   mt7921e is not loaded and no interface is bound; nothing to report.
+
+====================================================
+RESULT: 4 critical item(s) missing or unverified —
+DO NOT REBOOT until these are resolved:
+  - kernel signing hook missing: /etc/kernel/postinst.d/zz-sign-kernel
+  - stock-kernel apt pin missing: /etc/apt/preferences.d/block-stock-kernel.pref
+  - /boot/vmlinuz-6.1.158+ is missing
+  - Secure Boot state unverified (install mokutil)
+====================================================

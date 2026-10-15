@@ -1,0 +1,346 @@
+=== DRY RUN MODE ===
+Parsed flags: guc=false
+  auto-upgrade=false maintenance-schedule=weekly
+  multiverse=false battery-limit=unchanged
+  sysctl=true audio-powersave=true
+  fan-profile=unchanged epp=unchanged
+  zram=false
+  auto-power=false pl1=unchanged pl2=unchanged
+  kbd-timeout=false
+  bbr=false browser-wayland=false
+  usb-autosuspend=false disable-ppd=false
+  mt7921e-aspm=false
+  force-tlp-override=false
+  skip-update=true full-upgrade=false
+
+Simulated actions follow; nothing below is applied.
+
+== Power-management ownership (TLP / power-profiles-daemon / thermald) ==
+   TLP: present=false active=false
+   power-profiles-daemon: active=false (helpers delegate via powerprofilesctl when active)
+   thermald: active=false (thermal policy left to thermald)
+== 1-3. Skipping update/fwupd/snap/flatpak (--skip-update) ==
+== 4. thermald ==
+[DRY-RUN] apt-get -y -o Dpkg::Options::=--force-confold -o DPkg::Lock::Timeout=600 install thermald
+[DRY-RUN] systemctl enable --now thermald
+== 5. powertop (interactive diagnostics only) ==
+[DRY-RUN] apt-get -y -o Dpkg::Options::=--force-confold -o DPkg::Lock::Timeout=600 install powertop
+[DRY-RUN] systemctl daemon-reload
+   powertop installed for interactive, read-only diagnostics: sudo powertop
+   Script-managed powertop-autotune.service removed if present; unowned units preserved.
+== 6. NVMe TRIM — weekly timer ==
+[DRY-RUN] systemctl enable --now fstrim.timer
+== 7. CPU microcode ==
+[DRY-RUN] apt-get -y -o Dpkg::Options::=--force-confold -o DPkg::Lock::Timeout=600 install intel-microcode
+== 8. Intel VA-API / QuickSync ==
+   'intel-media-va-driver-non-free' has no candidate and this does not look like
+   Ubuntu (os-release: 'debian') — not touching repository configuration.
+   WARNING: no Intel VA-API driver package has an installable candidate in
+   your enabled repos. Skipping. Check: sudo add-apt-repository multiverse
+== 9. i915 legacy config cleanup + Intel DRM / GuC-HuC diagnostics ==
+   Skipped. Re-run with --with-guc for read-only DRM/GuC/HuC diagnostics.
+== 10. Automated maintenance (weekly) ==
+[DRY-RUN] -> Write file: /usr/local/bin/system-maintenance.sh (mode 0755)
+[DRY-RUN]   | #!/usr/bin/env bash
+[DRY-RUN]   | # Managed by vivobook_optimize.sh v16.1
+[DRY-RUN]   | set -Eeuo pipefail
+[DRY-RUN]   | 
+[DRY-RUN]   | exec 9>/run/system-maintenance.lock
+[DRY-RUN]   | flock -n 9 || { echo "Another maintenance run is already in progress. Exiting."; exit 0; }
+[DRY-RUN]   | 
+[DRY-RUN]   | export DEBIAN_FRONTEND=noninteractive
+[DRY-RUN]   | 
+[DRY-RUN]   | JOURNAL_VACUUM_TIME="2weeks"
+[DRY-RUN]   | JOURNAL_VACUUM_SIZE="500M"
+[DRY-RUN]   | 
+[DRY-RUN]   | # v15.2: classify the outcome explicitly. Genuine failures are never hidden:
+[DRY-RUN]   | # the run ends FAILED (set -e), ends with NON-FATAL WARNINGS (network outage
+[DRY-RUN]   | # during apt-get update, a flaky flatpak remote, etc.), or fully SUCCEEDS.
+[DRY-RUN]   | WARN_COUNT=0
+[DRY-RUN]   | SUCCESS=false
+[DRY-RUN]   | trap '
+[DRY-RUN]   |   rc=$?
+[DRY-RUN]   |   if [[ "$SUCCESS" == true ]] && (( WARN_COUNT == 0 )); then
+[DRY-RUN]   |     echo "=== Completed successfully: $(date) ==="
+[DRY-RUN]   |   elif [[ "$SUCCESS" == true ]]; then
+[DRY-RUN]   |     echo "=== Completed with ${WARN_COUNT} non-fatal warning(s): $(date) ==="
+[DRY-RUN]   |   else
+[DRY-RUN]   |     echo "=== FAILED: $(date), exit $rc ==="
+[DRY-RUN]   |   fi
+[DRY-RUN]   | ' EXIT
+[DRY-RUN]   | 
+[DRY-RUN]   | warn() {
+[DRY-RUN]   |   WARN_COUNT=$((WARN_COUNT + 1))
+[DRY-RUN]   |   echo "   WARNING: $*" >&2
+[DRY-RUN]   | }
+[DRY-RUN]   | 
+[DRY-RUN]   | echo "=== Starting Maintenance: $(date) ==="
+[DRY-RUN]   | if ! apt-get -o DPkg::Lock::Timeout=900 update; then
+[DRY-RUN]   |   warn "apt-get update failed (offline / mirror error?) — continuing independent maintenance steps."
+[DRY-RUN]   | fi
+[DRY-RUN]   | 
+[DRY-RUN]   | # Automated package upgrades and kernel pruning are intentionally NOT performed
+[DRY-RUN]   | # by this timer: standard security updates (including kernel management) are
+[DRY-RUN]   | # delegated to the distro's unattended-upgrades configuration.
+[DRY-RUN]   | echo "   (Skipping package upgrades/kernel pruning: standard security updates are"
+[DRY-RUN]   | echo "    handled by the distro's unattended-upgrades configuration.)"
+[DRY-RUN]   | apt-get -y autoclean || warn "apt-get autoclean failed"
+[DRY-RUN]   | 
+[DRY-RUN]   | if command -v flatpak &>/dev/null; then
+[DRY-RUN]   |   flatpak update -y || warn "system flatpak update failed"
+[DRY-RUN]   | 
+[DRY-RUN]   |   if command -v runuser &>/dev/null; then
+[DRY-RUN]   |     while IFS=: read -r U_NAME _ U_UID _ _ U_HOME U_SHELL; do
+[DRY-RUN]   |       [[ "$U_UID" =~ ^[0-9]+$ ]] || continue
+[DRY-RUN]   |       (( U_UID >= 1000 && U_UID < 65000 )) || continue
+[DRY-RUN]   |       case "$U_SHELL" in
+[DRY-RUN]   |         */nologin|*/false|"") continue ;;
+[DRY-RUN]   |       esac
+[DRY-RUN]   |       [[ -n "$U_HOME" && -d "$U_HOME" ]] || continue
+[DRY-RUN]   |       [[ -d "$U_HOME/.local/share/flatpak" ]] || continue
+[DRY-RUN]   |       if [[ ! -e "/run/user/$U_UID/bus" ]]; then
+[DRY-RUN]   |         echo "   Skipping user flatpak update for $U_NAME: D-Bus session bus is unavailable."
+[DRY-RUN]   |         continue
+[DRY-RUN]   |       fi
+[DRY-RUN]   |       echo "   Updating user-scoped flatpaks for: $U_NAME"
+[DRY-RUN]   |       runuser -u "$U_NAME" -- env \
+[DRY-RUN]   |         HOME="$U_HOME" \
+[DRY-RUN]   |         XDG_DATA_HOME="$U_HOME/.local/share" \
+[DRY-RUN]   |         XDG_CACHE_HOME="$U_HOME/.cache" \
+[DRY-RUN]   |         XDG_RUNTIME_DIR="/run/user/$U_UID" \
+[DRY-RUN]   |         DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$U_UID/bus" \
+[DRY-RUN]   |         flatpak --user update -y --noninteractive ||
+[DRY-RUN]   |         warn "user flatpak update failed for $U_NAME (continuing)"
+[DRY-RUN]   |     done < /etc/passwd
+[DRY-RUN]   |   else
+[DRY-RUN]   |     echo "   NOTE: 'runuser' not available — skipping per-user flatpak updates."
+[DRY-RUN]   |   fi
+[DRY-RUN]   | fi
+[DRY-RUN]   | 
+[DRY-RUN]   | # Developer runtimes: pipx-managed tools per user session
+[DRY-RUN]   | if command -v runuser &>/dev/null; then
+[DRY-RUN]   |   while IFS=: read -r U_NAME _ U_UID _ _ U_HOME U_SHELL; do
+[DRY-RUN]   |     [[ "$U_UID" =~ ^[0-9]+$ ]] || continue
+[DRY-RUN]   |     (( U_UID >= 1000 && U_UID < 65000 )) || continue
+[DRY-RUN]   |     case "$U_SHELL" in
+[DRY-RUN]   |       */nologin|*/false|"") continue ;;
+[DRY-RUN]   |     esac
+[DRY-RUN]   |     [[ -n "$U_HOME" && -d "$U_HOME" ]] || continue
+[DRY-RUN]   |     [[ -d "$U_HOME/.local/share/pipx/venvs" || -d "$U_HOME/.local/pipx/venvs" ]] || continue
+[DRY-RUN]   |     PIPX_BIN=""
+[DRY-RUN]   |     if [[ -x "$U_HOME/.local/bin/pipx" ]]; then
+[DRY-RUN]   |       PIPX_BIN="$U_HOME/.local/bin/pipx"
+[DRY-RUN]   |     elif command -v pipx &>/dev/null; then
+[DRY-RUN]   |       PIPX_BIN="$(command -v pipx)"
+[DRY-RUN]   |     fi
+[DRY-RUN]   |     [[ -n "$PIPX_BIN" ]] || continue
+[DRY-RUN]   |     echo "   Upgrading pipx-managed tools for: $U_NAME"
+[DRY-RUN]   |     runuser -u "$U_NAME" -- env \
+[DRY-RUN]   |       HOME="$U_HOME" \
+[DRY-RUN]   |       PATH="$U_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin" \
+[DRY-RUN]   |       "$PIPX_BIN" upgrade-all ||
+[DRY-RUN]   |       warn "pipx upgrade-all failed for $U_NAME (continuing)"
+[DRY-RUN]   |   done < /etc/passwd
+[DRY-RUN]   | fi
+[DRY-RUN]   | 
+[DRY-RUN]   | if command -v fwupdmgr &>/dev/null; then
+[DRY-RUN]   |   fwupdmgr refresh || warn "fwupd metadata refresh failed"
+[DRY-RUN]   |   # Do not run fwupdmgr update unattended
+[DRY-RUN]   | fi
+[DRY-RUN]   | 
+[DRY-RUN]   | if command -v journalctl &>/dev/null; then
+[DRY-RUN]   |   echo "   Vacuuming journal (time > ${JOURNAL_VACUUM_TIME}, size > ${JOURNAL_VACUUM_SIZE})"
+[DRY-RUN]   |   journalctl --vacuum-time="${JOURNAL_VACUUM_TIME}" || warn "journal vacuum by time failed"
+[DRY-RUN]   |   journalctl --vacuum-size="${JOURNAL_VACUUM_SIZE}" || warn "journal vacuum by size failed"
+[DRY-RUN]   |   journalctl --disk-usage || true
+[DRY-RUN]   | fi
+[DRY-RUN]   | 
+[DRY-RUN]   | SUCCESS=true
+[DRY-RUN] chmod 0755 /usr/local/bin/system-maintenance.sh
+[DRY-RUN] -> Install systemd unit: /etc/systemd/system/system-maintenance.service (mode 0644)
+[DRY-RUN]   | # Managed by vivobook_optimize.sh v16.1
+[DRY-RUN]   | [Unit]
+[DRY-RUN]   | Description=Automated System Maintenance and Updates
+[DRY-RUN]   | After=network-online.target
+[DRY-RUN]   | Wants=network-online.target
+[DRY-RUN]   | # v15.2: ConditionACPower=true removed. With a monthly timer it could skip
+[DRY-RUN]   | # maintenance indefinitely on an often-unplugged laptop; Persistent=true on
+[DRY-RUN]   | # the timer already reschedules runs missed while powered off, and the
+[DRY-RUN]   | # workload (update index refresh, autoclean, journal vacuum) is safe on
+[DRY-RUN]   | # battery and deliberately niced down.
+[DRY-RUN]   | 
+[DRY-RUN]   | [Service]
+[DRY-RUN]   | Type=oneshot
+[DRY-RUN]   | TimeoutStartSec=1h
+[DRY-RUN]   | Nice=10
+[DRY-RUN]   | IOSchedulingClass=best-effort
+[DRY-RUN]   | IOSchedulingPriority=6
+[DRY-RUN]   | ExecStart=/usr/local/bin/system-maintenance.sh
+[DRY-RUN]   | StandardOutput=journal
+[DRY-RUN]   | StandardError=journal
+[DRY-RUN] -> Install systemd unit: /etc/systemd/system/system-maintenance.timer (mode 0644)
+[DRY-RUN]   | # Managed by vivobook_optimize.sh v16.1
+[DRY-RUN]   | [Unit]
+[DRY-RUN]   | Description=Run weekly system maintenance
+[DRY-RUN]   | 
+[DRY-RUN]   | [Timer]
+[DRY-RUN]   | OnCalendar=weekly
+[DRY-RUN]   | Persistent=true
+[DRY-RUN]   | RandomizedDelaySec=1h
+[DRY-RUN]   | 
+[DRY-RUN]   | [Install]
+[DRY-RUN]   | WantedBy=timers.target
+[DRY-RUN] systemctl daemon-reload
+[DRY-RUN] systemctl enable --now system-maintenance.timer
+[DRY-RUN] systemctl restart system-maintenance.timer
+   Maintenance timer (re)started: schedule changed from 'none' to 'weekly'.
+
+   Maintenance timer configured. Schedule: weekly.
+   This value reflects only this run — re-run with a different
+   --maintenance-schedule to change it later.
+   The timer never runs package upgrades, kernel purges, or firmware flashes:
+   security updates are delegated to unattended-upgrades, and firmware
+   updates require a supervised 'sudo fwupdmgr update' (only the metadata
+   refresh runs unattended).
+   Maintenance also vacuums the journal (2 weeks / 500M), upgrades pipx-managed
+   tools, and updates per-user flatpak installations for accounts with
+   UID >= 1000 and a real login shell.
+   Check status any time: journalctl -u system-maintenance.service
+== 11. Kernel sysctl tuning (/etc/sysctl.d/99-vivobook.conf) ==
+[DRY-RUN] -> Write file: /etc/sysctl.d/99-vivobook.conf (mode 0644)
+[DRY-RUN]   | # Managed by vivobook_optimize.sh v16.1 — safe, targeted desktop/laptop tuning.
+[DRY-RUN]   | # Use --restore-defaults to remove this file, reset writeback, and reapply distro sysctls.
+[DRY-RUN]   | 
+[DRY-RUN]   | # 16GB RAM: prefer keeping the working set resident, but do NOT disable swap
+[DRY-RUN]   | # pressure entirely (0/1 harms reclaim behaviour and hibernation headroom).
+[DRY-RUN]   | vm.swappiness = 10
+[DRY-RUN]   | 
+[DRY-RUN]   | # IDEs, file managers, sync clients and dev tooling routinely exhaust the
+[DRY-RUN]   | # default watch limit; 524288 is the widely used desktop value.
+[DRY-RUN]   | fs.inotify.max_user_watches = 524288
+[DRY-RUN]   | 
+[DRY-RUN]   | # Disable NMI watchdog to reduce periodic CPU wakeups and save energy.
+[DRY-RUN]   | kernel.nmi_watchdog = 0
+[DRY-RUN]   | 
+[DRY-RUN]   | # Idle VM dirty page writeback interval extended to 15 seconds.
+[DRY-RUN]   | vm.dirty_writeback_centisecs = 1500
+[DRY-RUN] chmod 0644 /etc/sysctl.d/99-vivobook.conf
+   Written and applied. Effective values now:
+     vm.swappiness = unavailable (optional kernel interface)
+     fs.inotify.max_user_watches = unavailable (optional kernel interface)
+     kernel.nmi_watchdog = unavailable (optional kernel interface)
+     vm.dirty_writeback_centisecs = unavailable (optional kernel interface)
+   NOTE: another file in /etc/sysctl.d/ that sorts AFTER 99-vivobook.conf
+   (or /etc/sysctl.conf semantics on some setups) can still override these.
+== 11b. TCP BBR & Fair Queuing (/etc/sysctl.d/98-network-bbr.conf) ==
+   Skipped. Re-run with --with-bbr to enable TCP BBR.
+== 12. Intel HD Audio power saving ==
+   snd_hda_intel not present on this system — skipping (no file written).
+== 12b. WirePlumber ALSA suspend timeout (upstream default) ==
+   WirePlumber's upstream 5s ALSA suspend timeout default is retained;
+   managed WirePlumber configuration files removed if present.
+== 13. ASUS battery charge threshold (asus_wmi) ==
+   No 'charge_control_end_threshold' attribute found under /sys/class/power_supply/BAT*.
+   Either asus_wmi/asus_nb_wmi is not bound, or this firmware doesn't expose the
+   knob. Nothing to configure. Diagnose with:
+     lsmod | grep -i asus
+     ls /sys/class/power_supply/
+== 14. ACPI platform profile / ASUS thermal profile ==
+   Not requested — no thermal profile changes made.
+== 15. Intel P-State Energy Performance Preference (EPP) ==
+   Not requested — no EPP changes made.
+== 15c. power-profiles-daemon conflict resolution (--disable-ppd) ==
+   Skipped. Re-run with --disable-ppd to resolve potential desktop EPP overlaps.
+== 15d. Refresh existing managed sleep hooks (no create/enable/start) ==
+   No resume hooks installed; nothing to refresh (none are created here).
+== 16. zRAM compressed in-memory swap ==
+   Skipped. Re-run with --with-zram to install and configure systemd-zram-generator.
+== 17. Wi-Fi runtime power management (driver-agnostic, via iw) ==
+   No wireless interface detected on this run.
+   No static wifi module options are staged by this step (upstream driver defaults
+   kept). The optional MediaTek MT7902 ASPM fallback is handled separately in step 17a.
+   Wi-Fi power saving is controlled dynamically via 'iw dev <iface> set power_save'
+   (AC off / battery on with --with-auto-power).
+== 17a. MediaTek MT7902 (mt7921e) optional ASPM fallback (--with-mt7921e-aspm) ==
+   Skipped (optional fallback; live disable_aspm=unavailable).
+   Use --with-mt7921e-aspm only if the Wi-Fi link is unstable on your kernel.
+== 17b. USB Runtime Autosuspend (--with-usb-autosuspend) ==
+   Skipped. Re-run with --with-usb-autosuspend to enable runtime autosuspend.
+== 17c. Browser Wayland Configuration (--with-browser-wayland) ==
+   Skipped. Re-run with --with-browser-wayland to set the managed Wayland flag.
+== 18. Non-destructive system status dashboard ==
+   Run at any time with:
+     sudo bash /home/<user>/vivobook-optimize/vivobook_optimize.sh --status
+   Alias:
+     sudo bash /home/<user>/vivobook-optimize/vivobook_optimize.sh --check
+   JSON:
+     sudo bash /home/<user>/vivobook-optimize/vivobook_optimize.sh --status-json
+== 19. Dynamic AC/Battery power switching (--with-auto-power) ==
+   Skipped. Re-run with --with-auto-power to enable dynamic AC/battery switching.
+== 20. Intel RAPL power limits (--pl1 / --pl2) ==
+   Not requested. Use --pl1=WATTS --pl2=WATTS to manage specific limits.
+   Providing only one value manages only that constraint; the other stays firmware-controlled.
+== 21. NVMe I/O scheduler (kernel default) ==
+[DRY-RUN] udevadm control --reload-rules
+   NVMe I/O scheduler left at the kernel default ('none' for multiqueue NVMe).
+   Managed udev rule removed if present.
+   To verify: cat /sys/block/nvme*/queue/scheduler
+== 22. Video Acceleration Environment (deprecated) ==
+   /etc/environment.d/99-vivobook-vaapi.conf removed if script-managed and present.
+   VA-API driver selection and Firefox protocol handling are left to upstream defaults.
+== 23. Keyboard backlight inactivity timeout (--with-kbd-timeout) ==
+   Skipped. Re-run with --with-kbd-timeout to enable keyboard backlight auto-off.
+[DRY-RUN] Append v16.1 run summary to /var/log/vivobook-optimize.log
+
+====================================================
+Done — ASUS Vivobook Optimization Pass v16.1.
+Flags this run:
+  guc=false
+  auto-upgrade=false maintenance-schedule=weekly
+  multiverse=false battery-limit=unchanged
+  sysctl=true audio-powersave=true
+  fan-profile=unchanged epp=unchanged
+  zram=false
+  auto-power=false pl1=unchanged pl2=unchanged
+  kbd-timeout=false
+  bbr=false browser-wayland=false
+  usb-autosuspend=false disable-ppd=false
+  mt7921e-aspm=false
+  force-tlp-override=false
+  dry-run=true
+  skip-update=true full-upgrade=false
+
+Also reboot to apply: CPU microcode (if its version changed this run);
+staged snd_hda_intel boot options (audio-powersave.conf) — they apply only at the
+next module load (step 12 writes the file only on the legacy HDA path; with Intel
+SOF it stages nothing); unloading of module parameters staged by earlier script
+versions (i915/iwlwifi, if any); and staged fwupd firmware updates (if
+--with-auto-upgrade applied any).
+thermald, VA-API packages, fstrim.timer, sysctl tuning, battery threshold,
+thermal profile, EPP, zRAM, dynamic power switching, RAPL limits, keyboard
+backlight timeout, and the maintenance timer are active now when requested
+and supported (VA-API: restart already-running apps to pick it up).
+
+Verify after reboot:
+  sudo fwupdmgr get-devices
+  vainfo                       # run as your normal user, not root/sudo
+  sudo dmesg | grep -iE 'GuC|HuC|microcode'
+  systemctl list-timers
+  journalctl -u system-maintenance.service
+  sysctl vm.swappiness fs.inotify.max_user_watches kernel.nmi_watchdog vm.dirty_writeback_centisecs
+  cat /sys/module/snd_hda_intel/parameters/power_save   # live value; exposed alongside SOF here
+  cat /sys/module/mt7921e/parameters/disable_aspm
+  sudo bash /home/<user>/vivobook-optimize/vivobook_optimize.sh --safe-mode-check              # boot-integrity gate (Wi-Fi item informational)
+  cat /sys/class/power_supply/BAT*/charge_control_end_threshold
+  systemctl status battery-charge-threshold.service
+  cat /sys/firmware/acpi/platform_profile
+  cat /sys/devices/system/cpu/cpufreq/policy*/energy_performance_preference
+  cat /sys/power/mem_sleep
+  sudo cat /sys/kernel/debug/pmc_core/package_cstate_show
+  swapon --show
+  cat /sys/class/powercap/intel-rapl*/name
+  cat /sys/block/nvme*/queue/scheduler
+  cat /sys/class/leds/asus::kbd_backlight/stop_time
+  sudo bash /home/<user>/vivobook-optimize/vivobook_optimize.sh --status
+====================================================
+=== END DRY RUN — no files were modified. ===

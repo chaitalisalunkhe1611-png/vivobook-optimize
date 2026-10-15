@@ -1,0 +1,5 @@
+# Retain v16.0's explicit sed pipelines and systemctl output queries:
+# SC2001 suggests parameter substitution, but these are readable text pipelines.
+# SC2143 suggests grep -q; the existing queries intentionally capture output.
+# Both are style notes, not correctness warnings. Do not suppress warnings.
+disable=SC2001,SC2143

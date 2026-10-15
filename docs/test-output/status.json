@@ -1,0 +1,229 @@
+{
+  "generated": "Thu Oct 15 11:14:18 UTC 2026",
+  "script": { "name": "vivobook_optimize.sh", "version": "16.1", "schema": 3 },
+  "firmware": {
+    "product_name": "unavailable",
+    "board_name": "unavailable",
+    "bios_version": "unavailable",
+    "bios_date": "unavailable"
+  },
+  "boot_integrity": {
+    "secure_boot": "unknown",
+    "signing_hook": "absent",
+    "signing_hook_path": "/etc/kernel/postinst.d/zz-sign-kernel",
+    "running_kernel_signature": "file-missing",
+    "running_kernel": "/boot/vmlinuz-6.1.158+",
+    "newest_kernel_image": null,
+    "newest_kernel_signature": null,
+    "sbverify_installed": false
+  },
+  "kernel_pin": {
+    "path": "/etc/apt/preferences.d/block-stock-kernel.pref",
+    "present": false,
+    "blocks_stock_kernel": false
+  },
+  "kernel_cmdline": {
+    "i915_force_probe": null,
+    "xe_force_probe": null,
+    "pcie_aspm_policy": null,
+    "active_drm_driver": "unknown"
+  },
+  "power_ownership": {
+    "tlp_present": false,
+    "tlp_active": false,
+    "tlp_version": "unknown",
+    "ppd_active": false,
+    "thermald_active": false,
+    "force_tlp_override": false
+  },
+  "power_coherence": {
+    "ppd_current": "unavailable",
+    "requested_thermal": "",
+    "requested_thermal_ppd": "none",
+    "requested_epp": "",
+    "requested_epp_ppd": "none",
+    "agree": null,
+    "note": "PPD holds exactly one profile; conflicting --fan-profile/--epp are refused at parse time"
+  },
+  "battery": {
+    "name": null,
+    "charge_control_end_threshold": null,
+    "resume_hook_present": false,
+    "service_state": "not-installed"
+  },
+  "battery_health": {
+    "device": null,
+    "charge_full_uah": null,
+    "charge_full_design_uah": null,
+    "full": null,
+    "full_design": null,
+    "unit": null,
+    "cycle_count": null,
+    "health_percent": null
+  },
+  "thermal": {
+    "interface": null,
+    "active": null,
+    "choices": null
+    ,"service_state": "not-installed"
+  },
+  "cpu": {
+    "scaling_driver": "unavailable",
+    "intel_pstate_status": "unavailable",
+    "no_turbo": "unavailable",
+    "max_perf_pct": "unavailable",
+    "epp_service_state": "not-installed",
+    "epp": {
+
+    }
+  },
+  "suspend": {
+    "mem_sleep": null,
+    "active_mode": null,
+    "s2idle_active": false,
+    "pmc_core_available": false,
+    "pc8_residency": null,
+    "pc10_residency": null,
+    "deep_pc_states_reached": false,
+    "aspm_workaround_active": false,
+    "aspm_workaround_live": false,
+    "deep_pc_states_expected_absent": false,
+    "slp_s0_residency_usec": null,
+    "pc6_residency": null,
+    "package_cstates": { },
+    "s0ix_substates": null,
+    "s0i2_residency_usec": null,
+    "s0i3_residency_usec": null,
+    "s0ix_substate_source": null,
+    "residency_counters": "cumulative_since_boot",
+    "cpuidle_driver": "none"
+  },
+  "igpu": {
+    "device": null,
+    "driver": "unknown",
+    "cur_freq_mhz": null,
+    "max_freq_mhz": null,
+    "boost_freq_mhz": null,
+    "rp0_freq_mhz": null,
+    "rpn_freq_mhz": null
+  },
+  "i915": {
+    "module": "not_loaded",
+    "enable_guc": null,
+    "enable_fbc": null,
+    "enable_psr": null,
+    "enable_dc": null
+  },
+  "vaapi": {
+    "installed": false,
+    "driver_version": null
+  },
+  "browser_vaapi": [
+    { "user": "node", "brave_managed": false, "chrome_managed": false, "chromium_managed": false, "snap_chromium_managed": false },
+    { "user": "user", "brave_managed": false, "chrome_managed": false, "chromium_managed": false, "snap_chromium_managed": false }
+  ],
+  "wireplumber": {
+    "version": "not-installed",
+    "managed_config_present": false,
+    "suspend_timeout_seconds": 5
+  },
+  "audio": {
+    "power_save_live": null,
+    "power_save_controller_live": null,
+    "sof_loaded": false,
+    "staged_file": "/etc/modprobe.d/audio-powersave.conf",
+    "staged_file_present": false,
+    "staged_file_managed": null,
+    "staged_file_script_content": null,
+    "staged_options": null,
+    "staged_vs_live": "no-staged-file"
+  },
+  "usb_autosuspend": {
+    "rule_present": false,
+    "exempt_class_devices": [
+
+    ],
+    "exempt_class_devices_on_auto": 0,
+    "mismatch_applicable": false
+  },
+  "power_profiles_daemon": {
+    "present": false,
+    "active": "unknown",
+    "enabled": "unknown",
+    "masked": false
+  },
+  "sysctl": {
+    "vm.swappiness": null,
+    "vm.vfs_cache_pressure": null,
+    "fs.inotify.max_user_watches": null,
+    "kernel.nmi_watchdog": null,
+    "vm.dirty_writeback_centisecs": null
+  },
+  "bbr": {
+    "module_available": false,
+    "tcp_congestion_control": "unknown",
+    "default_qdisc": "unknown",
+    "config_present": false,
+    "unmanaged_override_files": []
+  },
+  "sysctl_overrides": [
+    { "file": "/etc/sysctl.d/99-sysctl.conf", "key": "fs.inotify.max_user_watches", "value": "65536", "applies": "no-managed-file", "managed_file": "/etc/sysctl.d/99-vivobook.conf" }
+  ],
+  "wifi": {
+    "interfaces": [
+
+    ],
+    "legacy_iwlwifi_config_present": false,
+    "mt7921e": {
+      "in_use": false,
+      "config_present": false,
+      "managed": false,
+      "disable_aspm_1": false,
+      "disable_aspm_live": "unavailable",
+      "aspm_workaround_active": false,
+      "aspm_workaround_live": false
+    }
+  },
+  "timers": {
+    "fstrim.timer": { "enabled": "unknown", "next": "unknown" },
+    "system-maintenance.timer": { "enabled": "unknown", "next": "unknown" }
+  },
+  "maintenance": {
+    "active_state": "unknown",
+    "exec_main_status": "unknown",
+    "active_exit_timestamp": "unknown"
+  },
+  "zram": {
+    "generator_config_present": false,
+    "devices": [
+
+    ],
+    "swap": ""
+  },
+  "rapl": {
+    "available": false,
+    "lock_state_probed": false,
+    "locked": null
+  },
+  "nvme": {
+
+  },
+  "dynamic_power": {
+    "ac_online": "unknown",
+    "udev_rule_present": false,
+    "service_enabled": "unknown"
+  },
+  "keyboard_backlight": {
+    "service_enabled": "unknown",
+    "service_state": "not-installed",
+    "device_present": false, "brightness": null, "stop_time": null
+  },
+  "sleep_hooks": {
+    "vivobook-battery": { "unit": "battery-charge-threshold.service", "hook_state": "absent", "unit_state": "not-installed" },
+    "vivobook-thermal-profile": { "unit": "asus-thermal-profile.service", "hook_state": "absent", "unit_state": "not-installed" },
+    "vivobook-intel-epp": { "unit": "intel-epp-profile.service", "hook_state": "absent", "unit_state": "not-installed" },
+    "vivobook-kbd-timeout": { "unit": "vivobook-kbd-timeout.service", "hook_state": "absent", "unit_state": "not-installed" },
+    "vivobook-power-switch": { "unit": "vivobook-power-switch.service", "hook_state": "absent", "unit_state": "not-installed" }
+  },
+  "reboot_required": false
+}

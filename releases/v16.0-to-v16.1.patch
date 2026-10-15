@@ -1,0 +1,1105 @@
+--- vivobook_optimize_v16.sh
++++ vivobook_optimize_v16.1.sh
+@@ -1,8 +1,12 @@
+ #!/usr/bin/env bash
+ #
+-# ASUS Vivobook 16 (X1605VA) — Optimization Pass v16.0
++# ASUS Vivobook 16 (X1605VA) — Optimization Pass v16.1
+ # i5-13420H (Raptor Lake-H, 4P+4E) / Intel UHD iGPU / 16GB DDR4 / Micron NVMe
+ #
++# v16.1 — audit fixes A-01..A-08; flags/defaults unchanged, JSON schema 3.
++# Preserve custom sysctls, USB bind exemptions, xe current frequency, dynamic
++# audio/resume policy, stale-browser cleanup, shared power detection, JSON shape.
++#
+ # v16.0 — drift-correction release. NO new flags, services or managed files.
+ # Baseline: kernel 7.2.6, S0ix functional, mt7921e ASPM workaround removed,
+ # PL1 firmware-locked (200 W), PL2=45 W, no charge cap. Changes:
+@@ -151,6 +155,8 @@
+ # END-USAGE
+ 
+ set -Eeuo pipefail
++# ShellCheck cannot track the assignment inside this deferred trap string.
++# shellcheck disable=SC2154
+ trap 'rc=$?; echo "ERROR at line $LINENO (exit code $rc)" >&2' ERR
+ 
+ # v15.2: track helper temp files (atomic_write / systemd unit verification) so
+@@ -171,7 +177,7 @@
+ # v15.3 (I-20): the JSON schema is versioned so consumers can detect changes.
+ # v16 (change 3): schema 3 only ADDS keys to schema 2, with one exception:
+ # i915.module now names the BOUND DRM driver (xe on this machine).
+-SCRIPT_VERSION="16.0"
++SCRIPT_VERSION="16.1"
+ SCRIPT_SCHEMA=3
+ DEFAULTS_FILE="/etc/vivobook-optimize/defaults.conf"
+ I915_CONF="/etc/modprobe.d/vivobook-i915.conf"
+@@ -245,10 +251,12 @@
+ 
+ if [[ -r "$DEFAULTS_FILE" ]]; then
+   if [[ "$EARLY_READONLY" == true ]]; then
+-    # shellcheck disable=SC1091
++    # Root-owned optional host configuration is not part of the repository.
++    # shellcheck source=/dev/null
+     . "$DEFAULTS_FILE" || true
+   else
+-    # shellcheck disable=SC1091
++    # Root-owned optional host configuration is not part of the repository.
++    # shellcheck source=/dev/null
+     . "$DEFAULTS_FILE"
+   fi
+ fi
+@@ -318,15 +326,17 @@
+ }
+ 
+ atomic_write() {
++  # A-01: restore calls helpers in conditionals, where errexit is suppressed.
++  # Explicitly fail before installing partial content if preparation fails.
+   local dest="$1" mode="$2" tmp dir want_mode
+   dir="$(dirname "$dest")"
+   if [[ ! -d "$dir" ]]; then
+-    install -d -m 0755 "$dir"
++    install -d -m 0755 "$dir" || return 1
+   fi
+-  tmp="$(mktemp "${dir}/.${SCRIPT_NAME}.XXXXXX")"
++  tmp="$(mktemp "${dir}/.${SCRIPT_NAME}.XXXXXX")" || return 1
+   TMP_REGISTRY+=("$tmp")
+-  cat > "$tmp"
+-  chmod "$mode" "$tmp"
++  cat > "$tmp" || return 1
++  chmod "$mode" "$tmp" || return 1
+   if [[ -e "$dest" ]]; then
+     chown --reference="$dest" "$tmp" 2>/dev/null || true
+   fi
+@@ -339,7 +349,7 @@
+     command rm -f "$tmp"
+     want_mode="$(printf '%o' "$(( 8#$mode ))")"
+     if [[ "$(stat -c '%a' "$dest" 2>/dev/null || true)" != "$want_mode" ]]; then
+-      chmod "$mode" "$dest"
++      chmod "$mode" "$dest" || return 1
+     fi
+     return 0
+   fi
+@@ -464,6 +474,44 @@
+   return 1
+ }
+ 
++# A-03: probe both i915 layouts and xe, falling through on read failure.
++igpu_current_freq() {
++  local root="$1" dir node value
++  # Probe current independently of max/RP0 discovery: a missing maximum node
++  # must not hide a readable current node in either driver's known layout.
++  for dir in "$root/gt/gt0" "$root" "$root"/device/tile*/gt*/freq0; do
++    for node in rps_cur_freq_mhz gt_cur_freq_mhz cur_freq act_freq; do
++      [[ -r "$dir/$node" ]] || continue
++      value="$(cat "$dir/$node" 2>/dev/null || true)"
++      if [[ "$value" =~ ^[0-9]+$ ]]; then
++        printf '%s\n' "$value"
++        return 0
++      fi
++    done
++  done
++  return 1
++}
++
++# A-07: return 0 online, 1 all readable external inputs offline, 2 unknown.
++# Optional root is for fixture tests; production callers use the real sysfs.
++# declare -f embeds this exact definition in vivobook-power-switch.sh.
++is_external_power_online() {
++  local root="${1:-/sys/class/power_supply}" supply type online seen=false
++  for supply in "$root"/*; do
++    [[ -r "$supply/type" && -r "$supply/online" ]] || continue
++    type="$(cat "$supply/type" 2>/dev/null || true)"
++    case "$type" in
++      Mains|USB|USB_PD|USB_C)
++        online="$(cat "$supply/online" 2>/dev/null || true)"
++        [[ "$online" == 1 ]] && return 0
++        [[ "$online" == 0 ]] && seen=true
++        ;;
++    esac
++  done
++  [[ "$seen" == true ]] && return 1
++  return 2
++}
++
+ get_wireplumber_version() {
+   if command -v wireplumber &>/dev/null; then
+     wireplumber --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1 || echo "unknown"
+@@ -490,7 +538,8 @@
+ 
+ is_managed_file() {
+   local f="$1"
+-  [[ -f "$f" ]] && grep -q "Managed by vivobook_optimize" "$f" 2>/dev/null
++  # A symlink to a marked file is not itself proof of script ownership.
++  [[ -f "$f" && ! -L "$f" ]] && grep -q "Managed by vivobook_optimize" "$f" 2>/dev/null
+ }
+ 
+ # PPD holds exactly ONE profile. These two maps are the single source of truth
+@@ -974,6 +1023,20 @@
+   printf '%s\n' "$v"
+ }
+ 
++# A-04: keep the historical battery default 1; honour a staged positive HDA
++# timeout. Strip leading zeroes to avoid octal arithmetic and bound to int32.
++battery_audio_timeout() {
++  local value
++  value="$(audio_staged_opt power_save)"
++  value="${value#"${value%%[!0]*}"}"
++  if [[ "$value" =~ ^[1-9][0-9]*$ ]] && (( ${#value} <= 10 )) &&
++     (( 10#$value <= 2147483647 )); then
++    printf '%s\n' "$value"
++  else
++    printf '%s\n' 1
++  fi
++}
++
+ # Normalise booleans for comparison (Y/y/1 -> Y, N/n/0 -> N).
+ audio_norm_bool() {
+   case "$1" in
+@@ -984,6 +1047,7 @@
+ }
+ 
+ # no-staged-file | no-hda-options | live-unavailable | match | staged-differs-from-live
++# overridden-by-auto-power applies only to a power_save mismatch, not controller-only.
+ audio_staged_verdict() {
+   local s_ps s_psc l_ps l_psc differs=false
+   [[ -f "$AUDIO_CONF" ]] || { printf '%s\n' no-staged-file; return 0; }
+@@ -1004,7 +1068,12 @@
+     differs=true
+   fi
+   if [[ "$differs" == true ]]; then
+-    printf '%s\n' staged-differs-from-live
++    if [[ -n "$s_ps" && "$l_ps" != unavailable && "$s_ps" != "$l_ps" ]] &&
++       systemctl is-enabled --quiet vivobook-power-switch.service 2>/dev/null; then
++      printf '%s\n' overridden-by-auto-power
++    else
++      printf '%s\n' staged-differs-from-live
++    fi
+   else
+     printf '%s\n' match
+   fi
+@@ -1012,15 +1081,16 @@
+ 
+ # ---- v16 (change 7): resume (system-sleep) hooks ----------------------------
+ SLEEP_HOOK_DIR=/usr/lib/systemd/system-sleep
+-# hook-name:unit pairs for the four script-written resume hooks.
++# hook-name:unit pairs for the five script-written resume hooks.
+ SLEEP_HOOK_PAIRS=(
+   vivobook-battery:battery-charge-threshold.service
+   vivobook-thermal-profile:asus-thermal-profile.service
+   vivobook-intel-epp:intel-epp-profile.service
+   vivobook-kbd-timeout:vivobook-kbd-timeout.service
++  vivobook-power-switch:vivobook-power-switch.service
+ )
+ 
+-# The one hook body all four hooks share. v15.3 restarted the unit on every
++# The one hook body all five hooks share. v15.3 restarted the unit on every
+ # resume, so a deliberately DISABLED static-profile unit (thermal/EPP on the
+ # reference machine) was started again after each suspend and overrode the
+ # dynamic power-switch values. The restart is now guarded by is-enabled.
+@@ -1030,7 +1100,7 @@
+   local unit="$1"
+   cat << HOOK
+ #!/usr/bin/env bash
+-# Managed by vivobook_optimize.sh v16
++# Managed by vivobook_optimize.sh v16.1
+ # Re-applies $unit after resume, but only while that unit is enabled:
+ # a deliberately disabled unit is never started behind the admin's back.
+ if [[ "\${1:-}" == post ]] && systemctl is-enabled --quiet $unit 2>/dev/null; then
+@@ -1300,7 +1370,7 @@
+ # The --with-usb-autosuspend rule sets power/control=on for devices with an
+ # interface of class 03 (HID), e0 (wireless/BT), 01 (audio) or 0e (video).
+ # On the reference machine the webcam (1-9) and Bluetooth (1-10) still read
+-# "auto". This only REPORTS; the rule itself is unchanged.
++# "auto". This only REPORTS; v16.1 also enforces exemptions on bind.
+ USB_EXEMPT_CLASSES="03 e0 01 0e"
+ 
+ # Rows "<device>\t<classes>\t<power/control>\t<product>" (non-empty fields).
+@@ -1333,6 +1403,12 @@
+ 
+ remove_i915_conf() {
+   [[ -e "$I915_CONF" ]] || return 0
++  # Ownership safety: a legacy-looking unmarked config can be admin-written.
++  # Only explicit --restore-defaults opts into the inherited legacy matcher.
++  if ! is_managed_file "$I915_CONF" && [[ "$RESTORE_DEFAULTS" != true ]]; then
++    echo "   SKIPPED: unmarked $I915_CONF preserved (legacy removal requires --restore-defaults)."
++    return 0
++  fi
+   if grep -q "Managed by vivobook_optimize" "$I915_CONF" 2>/dev/null ||
+      grep -Eq '^[[:space:]]*options[[:space:]]+i915[[:space:]]+.*(enable_guc=3|enable_dc=2|enable_fbc=1|enable_psr=1)([[:space:]]|$)' "$I915_CONF" 2>/dev/null; then
+     if [[ "$DRY_RUN" == true ]]; then
+@@ -1487,6 +1563,43 @@
+   return 0
+ }
+ 
++restore_browser_flags_file() {
++  local target="$1" u_uid="$2" u_gid="$3"
++  [[ -f "$target" && ! -L "$target" ]] || return 0
++  grep -q "Managed by vivobook_optimize" "$target" 2>/dev/null || return 0
++
++  local remaining=() filtered
++  while IFS= read -r line || [[ -n "$line" ]]; do
++    line="${line%$'\r'}"
++    [[ "$line" =~ ^[[:space:]]*#[[:space:]]*Managed\ by\ vivobook_optimize ]] && continue
++    [[ -z "$line" ]] && continue
++    # Same token-aware purge as the write path: legacy tokens are stripped
++    # out of feature lists; unrelated user flags and features stay.
++    if filtered="$(filter_browser_flag_line "$line")"; then
++      remaining+=("$filtered")
++    fi
++  done < "$target"
++
++  local has_real_content=false
++  for rl in "${remaining[@]}"; do
++    if [[ -n "$rl" && ! "$rl" =~ ^[[:space:]]*# ]]; then
++      has_real_content=true
++      break
++    fi
++  done
++
++  if [[ "$has_real_content" == true ]]; then
++    local content=""
++    for rl in "${remaining[@]}"; do
++      content+="$rl"$'\n'
++    done
++    atomic_write "$target" 0644 <<< "$content"
++    chown "${u_uid}:${u_gid}" "$target"
++  else
++    rm -f "$target"
++  fi
++}
++
+ apply_browser_flags_for_user() {
+   local u_name="$1" u_uid="$2" u_gid="$3" u_home="$4"
+   local cfg_dir="${u_home}/.config"
+@@ -1539,7 +1652,7 @@
+       fi
+     done
+ 
+-    local content="# Managed by vivobook_optimize.sh v16 --with-browser-wayland"$'\n'
++    local content="# Managed by vivobook_optimize.sh v16.1 --with-browser-wayland"$'\n'
+     for nl in "${new_lines[@]}"; do
+       content+="$nl"$'\n'
+     done
+@@ -1564,6 +1677,7 @@
+       chromium-flags.conf) browser=chromium ;;
+     esac
+     if ! browser_installed "$browser"; then
++      restore_browser_flags_file "$target" "$u_uid" "$u_gid"
+       not_installed=$((not_installed + 1))
+       continue
+     fi
+@@ -1576,6 +1690,9 @@
+ 
+   # Chromium Snap path (Ubuntu Snap package)
+   local snap_chromium_dir="${u_home}/snap/chromium/common"
++  if [[ -d "$snap_chromium_dir" ]] && ! browser_installed chromium; then
++    restore_browser_flags_file "$snap_chromium_dir/chromium-flags.conf" "$u_uid" "$u_gid"
++  fi
+   if [[ -d "$snap_chromium_dir" ]] && browser_installed chromium; then
+     local snap_target="${snap_chromium_dir}/chromium-flags.conf"
+     if _write_flags_file "$snap_target"; then
+@@ -1594,60 +1711,103 @@
+   local cfg_dir="${u_home}/.config"
+   [[ -d "$cfg_dir" ]] || return 0
+ 
+-  # Helper to restore a flags file (remove managed entries)
+-  _restore_flags_file() {
+-    local target="$1"
+-    [[ -f "$target" ]] || return 0
+-    grep -q "Managed by vivobook_optimize" "$target" 2>/dev/null || return 0
+-
+-    local remaining=() filtered
+-    while IFS= read -r line || [[ -n "$line" ]]; do
+-      line="${line%$'\r'}"
+-      [[ "$line" =~ ^[[:space:]]*#[[:space:]]*Managed\ by\ vivobook_optimize ]] && continue
+-      [[ -z "$line" ]] && continue
+-      # Same token-aware purge as the write path: legacy tokens are stripped
+-      # out of feature lists; unrelated user flags and features stay.
+-      if filtered="$(filter_browser_flag_line "$line")"; then
+-        remaining+=("$filtered")
+-      fi
+-    done < "$target"
+-
+-    local has_real_content=false
+-    for rl in "${remaining[@]}"; do
+-      if [[ -n "$rl" && ! "$rl" =~ ^[[:space:]]*# ]]; then
+-        has_real_content=true
+-        break
+-      fi
+-    done
+-
+-    if [[ "$has_real_content" == true ]]; then
+-      local content=""
+-      for rl in "${remaining[@]}"; do
+-        content+="$rl"$'\n'
+-      done
+-      atomic_write "$target" 0644 <<< "$content"
+-      chown "${u_uid}:${u_gid}" "$target"
+-    else
+-      rm -f "$target"
+-    fi
+-  }
+-
+   local b_file
+   for b_file in brave-flags.conf chrome-flags.conf chromium-flags.conf; do
+     local target="${cfg_dir}/${b_file}"
+-    _restore_flags_file "$target"
++    restore_browser_flags_file "$target" "$u_uid" "$u_gid"
+   done
+ 
+   # Snap Chromium
+   local snap_chromium_dir="${u_home}/snap/chromium/common"
+   if [[ -d "$snap_chromium_dir" ]]; then
+     local snap_target="${snap_chromium_dir}/chromium-flags.conf"
+-    _restore_flags_file "$snap_target"
++    restore_browser_flags_file "$snap_target" "$u_uid" "$u_gid"
+   fi
+ }
+ 
++# A-01: only migrate a marker-owned source; an unmarked destination is never
++# adopted. Preserve exact assignment lines (including optional '-' and globs).
++# 90 sorts before 99; the four keys rewritten in 99 are excluded. Abort on
++# destination collisions instead of guessing which administrator value wins.
++migrate_custom_vivobook_sysctls() {
++  local src=/etc/sysctl.d/99-vivobook.conf dest=/etc/sysctl.d/90-vivobook-local.conf
++  local line stripped key out existing
++  local -a custom=()
++  if [[ -L "$src" ]]; then
++    echo "ERROR: refusing sysctl migration through symlink $src; source preserved." >&2
++    return 1
++  fi
++  is_managed_file "$src" || return 0
++  while IFS= read -r line || [[ -n "$line" ]]; do
++    stripped="${line%%#*}"; stripped="${stripped%%;*}"
++    [[ "$stripped" == *=* ]] || continue
++    key="${stripped%%=*}"; key="${key//[[:space:]]/}"
++    key="${key#-}"; key="${key//\//.}"
++    case "$key" in
++      vm.swappiness|fs.inotify.max_user_watches|kernel.nmi_watchdog|vm.dirty_writeback_centisecs) continue ;;
++    esac
++    custom+=("$line")
++  done < "$src"
++  (( ${#custom[@]} > 0 )) || return 0
++  if [[ -L "$dest" ]] || { [[ -e "$dest" ]] && ! is_managed_file "$dest"; }; then
++    echo "ERROR: custom sysctls not migrated: $dest is not an owned regular file; source preserved." >&2
++    return 1
++  fi
++  out="# Managed by vivobook_optimize.sh v16.1 — preserved custom sysctls"$'\n'
++  if [[ -f "$dest" ]]; then
++    out="$(cat "$dest")"$'\n' || return 1
++  fi
++  for line in "${custom[@]}"; do
++    # Deduplicate against the accumulating content, not just the old file.
++    grep -Fqx -- "$line" <<< "$out" && continue
++    stripped="${line%%#*}"; stripped="${stripped%%;*}"
++    key="${stripped%%=*}"; key="${key//[[:space:]]/}"
++    key="${key#-}"; key="${key//\//.}"
++    while IFS= read -r existing || [[ -n "$existing" ]]; do
++      existing="${existing%%#*}"; existing="${existing%%;*}"
++      [[ "$existing" == *=* ]] || continue
++      existing="${existing%%=*}"; existing="${existing//[[:space:]]/}"
++      existing="${existing#-}"; existing="${existing//\//.}"
++      if [[ "$existing" == "$key" ]]; then
++        echo "ERROR: conflicting custom key $key; source preserved (merge manually)." >&2
++        return 1
++      fi
++    done <<< "$out"
++    out+="$line"$'\n'
++  done
++  echo "   Preserving custom sysctls: $src -> $dest"
++  # Here-string feeds atomic_write's cat; no pipeline/subshell loses registry.
++  atomic_write "$dest" 0644 <<< "${out%$'\n'}"
++}
++
++# On restore, repatriate user data to its original path WITHOUT our marker,
++# then remove the new managed migration file. Never delete custom settings.
++restore_custom_vivobook_sysctls() {
++  local src=/etc/sysctl.d/99-vivobook.conf dest=/etc/sysctl.d/90-vivobook-local.conf content
++  if [[ -L "$dest" ]]; then
++    echo "   SKIPPED: symlink migration file preserved: $dest"
++    RESTORE_FAILED+=("$dest")
++    return 1
++  fi
++  is_managed_file "$dest" || return 0
++  if [[ -e "$src" || -L "$src" ]]; then
++    echo "   SKIPPED: cannot return custom sysctls to an occupied $src; $dest preserved."
++    RESTORE_FAILED+=("$dest")
++    return 1
++  fi
++  if ! content="$(command sed '/^[[:space:]]*#[[:space:]]*Managed by vivobook_optimize/d' "$dest")"; then
++    RESTORE_FAILED+=("$dest")
++    return 1
++  fi
++  if ! atomic_write "$src" 0644 <<< "$content"; then
++    RESTORE_FAILED+=("$dest")
++    return 1
++  fi
++  restore_remove_owned "$dest"
++}
++
+ restore_defaults() {
+-  echo "== Restoring ASUS Vivobook v16 managed defaults =="
++  echo "== Restoring ASUS Vivobook v16.1 managed defaults =="
+   RESTORE_SKIPPED=()
+   RESTORE_FAILED=()
+   # v16 (change 5): ownership-aware. Each unit is disabled/stopped and removed
+@@ -1702,6 +1862,7 @@
+     /usr/lib/systemd/system-sleep/vivobook-thermal-profile \
+     /usr/lib/systemd/system-sleep/vivobook-intel-epp \
+     /usr/lib/systemd/system-sleep/vivobook-kbd-timeout \
++    /usr/lib/systemd/system-sleep/vivobook-power-switch \
+     /etc/default/vivobook-battery \
+     /etc/default/vivobook-thermal-profile \
+     /etc/default/vivobook-epp \
+@@ -1742,7 +1903,17 @@
+     BBR_CONF_WAS_MANAGED=true
+   fi
+ 
+-  restore_remove_owned /etc/sysctl.d/99-vivobook.conf || true
++  if migrate_custom_vivobook_sysctls; then
++    if restore_remove_owned /etc/sysctl.d/99-vivobook.conf; then
++      if [[ "$DRY_RUN" == true ]]; then
++        echo "[DRY-RUN] If custom sysctls were preserved: would return them to unmarked 99-vivobook.conf and remove owned 90-vivobook-local.conf."
++      else
++        restore_custom_vivobook_sysctls || true
++      fi
++    fi
++  else
++    RESTORE_FAILED+=(/etc/sysctl.d/99-vivobook.conf)
++  fi
+   restore_remove_owned /etc/sysctl.d/98-network-bbr.conf "$BBR_SYSCTL_LEGACY" || true
+   restore_remove_owned /etc/modules-load.d/bbr.conf "tcp_bbr" || true
+   # v16 (change 6): a marked audio file with hand-edited options is still
+@@ -2008,7 +2179,7 @@
+ 
+ log_summary() {
+   if [[ "$DRY_RUN" == true ]]; then
+-    echo "[DRY-RUN] Append v16 run summary to /var/log/vivobook-optimize.log"
++    echo "[DRY-RUN] Append v16.1 run summary to /var/log/vivobook-optimize.log"
+     return 0
+   fi
+   local reboot=no
+@@ -2029,7 +2200,7 @@
+   local guc_lines va_output va_driver card wp_ver
+ 
+   echo "===================================================="
+-  echo "ASUS Vivobook Optimization v16 — System Status"
++  echo "ASUS Vivobook Optimization v16.1 — System Status"
+   echo "Generated: $(date)"
+   echo "Script: $SCRIPT_NAME version $SCRIPT_VERSION (JSON schema $SCRIPT_SCHEMA)"
+   echo "===================================================="
+@@ -2150,11 +2321,6 @@
+   fi
+   # v16 (change 7): enabled / installed-disabled / not-installed + hook guard.
+   persistent_service_line battery-charge-threshold.service vivobook-battery
+-  if [[ -x /usr/lib/systemd/system-sleep/vivobook-battery ]]; then
+-    echo "  Resume re-apply hook: present (/usr/lib/systemd/system-sleep/vivobook-battery)"
+-  else
+-    echo "  Resume re-apply hook: absent"
+-  fi
+ 
+   echo
+   echo "[Battery health]"
+@@ -2367,13 +2533,9 @@
+     local max_f="unavailable" boost_f="unavailable" rp0_f="unavailable" rpn_f="unavailable" cur_f="unavailable"
+     local freq_info
+     freq_info="$(find_igpu_freq_files "$card" || true)"
++    cur_f="$(igpu_current_freq "$card" || echo unavailable)"
+     if [[ -n "$freq_info" ]]; then
+       read -r max_f boost_f rp0_f rpn_f <<< "$freq_info"
+-      if [[ -r "$(dirname "$max_f")/rps_cur_freq_mhz" ]]; then
+-        cur_f="$(cat "$(dirname "$max_f")/rps_cur_freq_mhz" 2>/dev/null || echo unknown)"
+-      elif [[ -r "$(dirname "$max_f")/gt_cur_freq_mhz" ]]; then
+-        cur_f="$(cat "$(dirname "$max_f")/gt_cur_freq_mhz" 2>/dev/null || echo unknown)"
+-      fi
+       max_f="$(cat "$max_f" 2>/dev/null || echo unknown)"
+       boost_f="$(cat "$boost_f" 2>/dev/null || echo unknown)"
+       rp0_f="$(cat "$rp0_f" 2>/dev/null || echo unknown)"
+@@ -2530,6 +2692,9 @@
+   fi
+   a_verdict="$(audio_staged_verdict)"
+   case "$a_verdict" in
++    overridden-by-auto-power)
++      echo "  Verdict:             power_save overridden by enabled auto-power (AC=0, battery=$(battery_audio_timeout))"
++      echo "                       power_save_controller remains a separate module-load option" ;;
+     staged-differs-from-live)
+       echo "  Verdict:             staged differs from live — applies on next module load/reboot" ;;
+     match)
+@@ -2542,8 +2707,8 @@
+       echo "  Verdict:             nothing staged (module defaults at load)" ;;
+   esac
+   if systemctl is-enabled --quiet vivobook-power-switch.service 2>/dev/null; then
+-    echo "  Note: --with-auto-power is enabled; it writes live power_save 0 on AC and 1 on"
+-    echo "        battery. The staged value only applies at module load."
++    echo "  Note: --with-auto-power controls live power_save: 0 on AC, $(battery_audio_timeout) on battery."
++    echo "        Other staged options still apply at module load."
+   fi
+ 
+   echo
+@@ -2826,14 +2991,13 @@
+   else
+     echo "  udev rule: absent"
+   fi
+-  local AC_ON=unknown
+-  for f in /sys/class/power_supply/AC*/online /sys/class/power_supply/ADP*/online; do
+-    [[ -e "$f" ]] || continue
+-    local val
+-    val="$(cat "$f" 2>/dev/null || echo 0)"
+-    [[ "$val" == "1" ]] && AC_ON=yes || AC_ON=no
+-    break
+-  done
++  local AC_ON=unknown ac_rc=0
++  if is_external_power_online; then
++    AC_ON=yes
++  else
++    ac_rc=$?
++    [[ "$ac_rc" == 1 ]] && AC_ON=no
++  fi
+   echo "  AC adapter online: $AC_ON"
+ 
+   echo
+@@ -3027,10 +3191,12 @@
+     fi
+   elif [[ -r /sys/devices/platform/asus-nb-wmi/throttle_thermal_policy ]]; then
+     echo "    \"interface\": \"asus_throttle_thermal_policy\","
+-    echo "    \"active\": $(json_string "$(status_value /sys/devices/platform/asus-nb-wmi/throttle_thermal_policy)")"
++    echo "    \"active\": $(json_string "$(status_value /sys/devices/platform/asus-nb-wmi/throttle_thermal_policy)"),"
++    echo "    \"choices\": null"
+   else
+     echo "    \"interface\": null,"
+-    echo "    \"active\": null"
++    echo "    \"active\": null,"
++    echo "    \"choices\": null"
+   fi
+   echo "    ,\"service_state\": $(json_string "$(unit_install_state asus-thermal-profile.service)")"
+   echo "  },"
+@@ -3146,13 +3312,9 @@
+     local max_f="null" boost_f="null" rp0_f="null" rpn_f="null" cur_f="null"
+     local freq_info
+     freq_info="$(find_igpu_freq_files "$card" || true)"
++    cur_f="$(igpu_current_freq "$card" || echo null)"
+     if [[ -n "$freq_info" ]]; then
+       read -r max_f boost_f rp0_f rpn_f <<< "$freq_info"
+-      if [[ -r "$(dirname "$max_f")/rps_cur_freq_mhz" ]]; then
+-        cur_f="$(cat "$(dirname "$max_f")/rps_cur_freq_mhz" 2>/dev/null || echo null)"
+-      elif [[ -r "$(dirname "$max_f")/gt_cur_freq_mhz" ]]; then
+-        cur_f="$(cat "$(dirname "$max_f")/gt_cur_freq_mhz" 2>/dev/null || echo null)"
+-      fi
+       max_f="$(cat "$max_f" 2>/dev/null || echo null)"
+       boost_f="$(cat "$boost_f" 2>/dev/null || echo null)"
+       rp0_f="$(cat "$rp0_f" 2>/dev/null || echo null)"
+@@ -3218,7 +3380,8 @@
+     echo "    \"installed\": true,"
+     echo "    \"driver_version\": $(json_string "$va_driver")"
+   else
+-    echo "    \"installed\": false"
++    echo "    \"installed\": false,"
++    echo "    \"driver_version\": null"
+   fi
+   echo "  },"
+ 
+@@ -3508,12 +3671,13 @@
+   echo "  },"
+ 
+   echo "  \"dynamic_power\": {"
+-  local ac_online="unknown"
+-  for f in /sys/class/power_supply/AC*/online /sys/class/power_supply/ADP*/online; do
+-    [[ -e "$f" ]] || continue
+-    ac_online="$(cat "$f" 2>/dev/null || echo 0)"
+-    break
+-  done
++  local ac_online="unknown" ac_rc=0
++  if is_external_power_online; then
++    ac_online=1
++  else
++    ac_rc=$?
++    [[ "$ac_rc" == 1 ]] && ac_online=0
++  fi
+   echo "    \"ac_online\": $(json_string "$ac_online"),"
+   local pwr_udev_present=false
+   [[ -f /etc/udev/rules.d/99-vivobook-power.rules ]] && pwr_udev_present=true
+@@ -3534,9 +3698,11 @@
+     if [[ -e /sys/class/leds/asus::kbd_backlight/stop_time ]]; then
+       echo "    ,"
+       echo "    \"stop_time\": $(json_string "$(cat /sys/class/leds/asus::kbd_backlight/stop_time 2>/dev/null || echo unknown)")"
++    else
++      echo '    ,"stop_time": null'
+     fi
+   else
+-    echo "    \"device_present\": false"
++    echo '    "device_present": false, "brightness": null, "stop_time": null'
+   fi
+   echo "  },"
+ 
+@@ -3572,7 +3738,7 @@
+   # v16 (change 1): informational findings; never change the exit code.
+   local -a SAFE_WARNS=()
+   echo "===================================================="
+-  echo "ASUS Vivobook v16 — safe-mode / boot-integrity check"
++  echo "ASUS Vivobook v16.1 — safe-mode / boot-integrity check"
+   echo "Generated: $(date)"
+   echo "Host: $(status_value /sys/class/dmi/id/product_name) / BIOS $(status_value /sys/class/dmi/id/bios_version)"
+   echo "Kernel: $(uname -r)"
+@@ -4333,11 +4499,12 @@
+ # powertop --auto-tune blanket-overrides runtime PM for all PCI/USB devices and
+ # conflicts with kernel/desktop power management; the autotune service is not
+ # enabled. Remove any unit left over from an earlier --with-powertop run.
+-systemctl disable --now powertop-autotune.service 2>/dev/null || true
+-rm -f /etc/systemd/system/powertop-autotune.service
++# Ownership safety: the old default path stopped/deleted any same-named unit.
++# A name alone is not evidence this script created it.
++restore_unit_owned powertop-autotune.service || true
+ systemctl daemon-reload
+ echo "   powertop installed for interactive, read-only diagnostics: sudo powertop"
+-echo "   powertop-autotune.service is not enabled (removed if previously installed)."
++echo "   Script-managed powertop-autotune.service removed if present; unowned units preserved."
+ 
+ echo "== 6. NVMe TRIM — weekly timer =="
+ systemctl enable --now fstrim.timer
+@@ -4349,6 +4516,8 @@
+ MULTIVERSE_ENABLED_NOW=false
+ if ! package_has_candidate intel-media-va-driver-non-free; then
+   OS_ID=""
++  # Host-provided distro identity, intentionally not linted as project code.
++  # shellcheck source=/dev/null
+   [[ -r /etc/os-release ]] &&
+     OS_ID="$(. /etc/os-release 2>/dev/null; echo "${ID:-}${ID_LIKE:+ $ID_LIKE}")"
+   if [[ "$OS_ID" != *ubuntu* ]]; then
+@@ -4497,7 +4666,7 @@
+ echo "== 10. Automated maintenance (${MAINTENANCE_SCHEDULE}) =="
+ atomic_write /usr/local/bin/system-maintenance.sh 0755 << 'MAINTENANCE_EOF'
+ #!/usr/bin/env bash
+-# Managed by vivobook_optimize.sh v16
++# Managed by vivobook_optimize.sh v16.1
+ set -Eeuo pipefail
+ 
+ exec 9>/run/system-maintenance.lock
+@@ -4616,7 +4785,7 @@
+ chmod 0755 /usr/local/bin/system-maintenance.sh
+ 
+ write_unit_file /etc/systemd/system/system-maintenance.service 0644 << 'EOF'
+-# Managed by vivobook_optimize.sh v16
++# Managed by vivobook_optimize.sh v16.1
+ [Unit]
+ Description=Automated System Maintenance and Updates
+ After=network-online.target
+@@ -4650,7 +4819,7 @@
+ fi
+ 
+ write_unit_file /etc/systemd/system/system-maintenance.timer 0644 << EOF
+-# Managed by vivobook_optimize.sh v16
++# Managed by vivobook_optimize.sh v16.1
+ [Unit]
+ Description=Run ${MAINTENANCE_SCHEDULE} system maintenance
+ 
+@@ -4688,16 +4857,12 @@
+ echo "   UID >= 1000 and a real login shell."
+ echo "   Check status any time: journalctl -u system-maintenance.service"
+ 
+-# TODO(v16, needs user confirmation — deliberately NOT changed): the machine
+-# facts (§18) say IPv6 is disabled via /etc/sysctl.d/99-vivobook.conf, but this
+-# step writes only the four keys below and rewrites the whole file. If IPv6
+-# lines were added to that file by hand, the first v16 run (header version
+-# bump -> one-time rewrite) drops them. Check first with:
+-#   grep -n ipv6 /etc/sysctl.d/99-vivobook.conf
+-# and move such lines to an unmanaged file (e.g. /etc/sysctl.d/90-ipv6.conf).
+-# IPv6 management is out of scope for v16.
++# A-01: custom values are migrated before the owned file is rewritten.
+ echo "== 11. Kernel sysctl tuning (/etc/sysctl.d/99-vivobook.conf) =="
+-if [[ "$WITH_SYSCTL" == true ]]; then
++if [[ "$WITH_SYSCTL" == true ]] &&
++   { [[ ! -e /etc/sysctl.d/99-vivobook.conf && ! -L /etc/sysctl.d/99-vivobook.conf ]] ||
++     is_managed_file /etc/sysctl.d/99-vivobook.conf; }; then
++  migrate_custom_vivobook_sysctls
+   ZRAM_SWAPPINESS=10
+   if [[ "$WITH_ZRAM" == true ]] ||
+      [[ -f /etc/systemd/zram-generator.conf ]] ||
+@@ -4708,7 +4873,7 @@
+     ZRAM_SWAPPINESS=100
+   fi
+   atomic_write /etc/sysctl.d/99-vivobook.conf 0644 << EOF
+-# Managed by vivobook_optimize.sh v16 — safe, targeted desktop/laptop tuning.
++# Managed by vivobook_optimize.sh v16.1 — safe, targeted desktop/laptop tuning.
+ # Use --restore-defaults to remove this file, reset writeback, and reapply distro sysctls.
+ 
+ # 16GB RAM: prefer keeping the working set resident, but do NOT disable swap
+@@ -4741,7 +4906,7 @@
+     echo "   WARNING: 'sysctl --system' reported an error; review output above." >&2
+   fi
+ else
+-  echo "   Skipped (--no-sysctl). Existing /etc/sysctl.d/99-vivobook.conf, if any,"
++  echo "   Skipped (--no-sysctl or unowned file). Existing /etc/sysctl.d/99-vivobook.conf, if any,"
+   echo "   was left untouched."
+ fi
+ 
+@@ -4788,14 +4953,14 @@
+ 
+     if [[ "$BBR_MODULE_OK" == true ]]; then
+       atomic_write /etc/modules-load.d/bbr.conf 0644 << 'BBR_MODULE_EOF'
+-# Managed by vivobook_optimize.sh v16 --with-bbr
++# Managed by vivobook_optimize.sh v16.1 --with-bbr
+ tcp_bbr
+ BBR_MODULE_EOF
+       chmod 0644 /etc/modules-load.d/bbr.conf
+     fi
+     if [[ "$BBR_SYSCTL_OK" == true ]]; then
+       atomic_write /etc/sysctl.d/98-network-bbr.conf 0644 << 'EOF'
+-# Managed by vivobook_optimize.sh v16 --with-bbr
++# Managed by vivobook_optimize.sh v16.1 --with-bbr
+ net.core.default_qdisc = fq
+ net.ipv4.tcp_congestion_control = bbr
+ EOF
+@@ -4847,7 +5012,7 @@
+     echo "   (live power_save=$(audio_hda_param power_save)); see the [HD Audio power save] status."
+   elif [[ -d /sys/module/snd_hda_intel ]] || modinfo snd_hda_intel &>/dev/null; then
+     atomic_write /etc/modprobe.d/audio-powersave.conf 0644 << 'EOF'
+-# Managed by vivobook_optimize.sh v16
++# Managed by vivobook_optimize.sh v16.1
+ # Idle the HDA codec after 1s of silence, and allow the controller to suspend.
+ # If you hear a click/pop on playback start, or the first ~0.5s of audio is
+ # clipped, set power_save=0 here (or delete this file) and reboot.
+@@ -4888,6 +5053,15 @@
+ echo "   managed WirePlumber configuration files removed if present."
+ 
+ echo "== 13. ASUS battery charge threshold (asus_wmi) =="
++# A-08: orphan cleanup must not depend on the unit OR battery node existing.
++if [[ "$BATTERY_LIMIT" == off ]] && tlp_gate "ASUS battery charge threshold cleanup"; then
++  restore_unit_owned battery-charge-threshold.service || true
++  for BAT_ARTIFACT in /usr/local/bin/set-battery-threshold.sh \
++      /usr/lib/systemd/system-sleep/vivobook-battery /etc/default/vivobook-battery; do
++    restore_remove_owned "$BAT_ARTIFACT" || true
++  done
++  systemctl daemon-reload
++fi
+ BAT_SYSFS=""
+ for b in /sys/class/power_supply/BAT*/charge_control_end_threshold; do
+   [[ -e "$b" ]] || continue
+@@ -4941,33 +5115,19 @@
+       echo "    80' — TLP owns ASUS charge thresholds when running.)"
+     fi
+   elif [[ "$BATTERY_LIMIT" == "off" ]]; then
+-    if [[ -e /etc/systemd/system/battery-charge-threshold.service ]]; then
+-      systemctl disable --now battery-charge-threshold.service &>/dev/null || true
+-      rm -f /etc/systemd/system/battery-charge-threshold.service
+-      rm -f /usr/local/bin/set-battery-threshold.sh
+-      rm -f /usr/lib/systemd/system-sleep/vivobook-battery
+-      rm -f /etc/default/vivobook-battery
+-      systemctl daemon-reload
+-      if [[ "$DRY_RUN" == true ]]; then
+-        echo "[DRY-RUN] Threshold service and resume hook would be removed."
+-      else
+-        echo "   Threshold service and resume hook removed."
+-      fi
+-    else
+-      echo "   No threshold service was installed; nothing to remove."
+-    fi
+-    # v16 (change 13): counted live reset (see battery_limit_off_reset).
++    echo "   Persistent threshold cleanup was handled above."
++    # Reset after discovery/module probing, including a newly exposed battery.
+     battery_limit_off_reset || true
+   else
+     atomic_write /etc/default/vivobook-battery 0644 <<EOF
+-# Managed by vivobook_optimize.sh v16 — consumed by set-battery-threshold.sh
++# Managed by vivobook_optimize.sh v16.1 — consumed by set-battery-threshold.sh
+ BATTERY_CHARGE_END_THRESHOLD=${BATTERY_LIMIT}
+ EOF
+     chmod 0644 /etc/default/vivobook-battery
+ 
+     atomic_write /usr/local/bin/set-battery-threshold.sh 0755 << 'BATTERY_EOF'
+ #!/usr/bin/env bash
+-# Managed by vivobook_optimize.sh v16
++# Managed by vivobook_optimize.sh v16.1
+ set -Eeuo pipefail
+ 
+ THRESH=80
+@@ -5009,7 +5169,7 @@
+ BATTERY_EOF
+ 
+     write_unit_file /etc/systemd/system/battery-charge-threshold.service 0644 << 'EOF'
+-# Managed by vivobook_optimize.sh v16
++# Managed by vivobook_optimize.sh v16.1
+ [Unit]
+ Description=Apply ASUS battery charge end threshold
+ After=basic.target
+@@ -5089,14 +5249,14 @@
+     echo "   Nothing was configured."
+   else
+     atomic_write /etc/default/vivobook-thermal-profile 0644 <<EOF
+-# Managed by vivobook_optimize.sh v16
++# Managed by vivobook_optimize.sh v16.1
+ ASUS_THERMAL_PROFILE=${FAN_PROFILE}
+ EOF
+     chmod 0644 /etc/default/vivobook-thermal-profile
+ 
+     atomic_write /usr/local/bin/set-asus-thermal-profile.sh 0755 << 'THERMAL_EOF'
+ #!/usr/bin/env bash
+-# Managed by vivobook_optimize.sh v16
++# Managed by vivobook_optimize.sh v16.1
+ set -Eeuo pipefail
+ 
+ PROFILE=""
+@@ -5201,7 +5361,7 @@
+ THERMAL_EOF
+ 
+     write_unit_file /etc/systemd/system/asus-thermal-profile.service 0644 << 'EOF'
+-# Managed by vivobook_optimize.sh v16
++# Managed by vivobook_optimize.sh v16.1
+ [Unit]
+ Description=Apply ASUS ACPI thermal platform profile
+ After=basic.target
+@@ -5263,14 +5423,14 @@
+       echo "   intel_pstate is active, but no EPP nodes were found. Nothing configured."
+     else
+       atomic_write /etc/default/vivobook-epp 0644 <<EOF
+-# Managed by vivobook_optimize.sh v16
++# Managed by vivobook_optimize.sh v16.1
+ INTEL_EPP_PROFILE=${EPP_PROFILE}
+ EOF
+       chmod 0644 /etc/default/vivobook-epp
+ 
+       atomic_write /usr/local/bin/set-intel-epp.sh 0755 << 'EPP_EOF'
+ #!/usr/bin/env bash
+-# Managed by vivobook_optimize.sh v16
++# Managed by vivobook_optimize.sh v16.1
+ set -Eeuo pipefail
+ 
+ PROFILE=""
+@@ -5358,7 +5518,7 @@
+ EPP_EOF
+ 
+       write_unit_file /etc/systemd/system/intel-epp-profile.service 0644 << 'EOF'
+-# Managed by vivobook_optimize.sh v16
++# Managed by vivobook_optimize.sh v16.1
+ [Unit]
+ Description=Apply Intel P-State Energy Performance Preference
+ After=basic.target
+@@ -5414,7 +5574,7 @@
+       fi
+ 
+       atomic_write /etc/default/vivobook-ppd-state 0644 << EOF
+-# Managed by vivobook_optimize.sh v16 --disable-ppd
++# Managed by vivobook_optimize.sh v16.1 --disable-ppd
+ PPD_WAS_PRESENT=true
+ PPD_WAS_ACTIVE=${PPD_ACTIVE}
+ PPD_WAS_ENABLED=${PPD_ENABLED}
+@@ -5468,7 +5628,7 @@
+ # swapoff/restart the populated device. Compare SEMANTICALLY (values, not
+ # file bytes) so a config written by a previous script version also matches;
+ # only a real difference triggers the disruptive reconfigure path.
+-ZRAM_DESIRED_CONF='# Managed by vivobook_optimize.sh v16 --with-zram
++ZRAM_DESIRED_CONF='# Managed by vivobook_optimize.sh v16.1 --with-zram
+ [zram0]
+ zram-size = min(ram / 2, 8192)
+ compression-algorithm = zstd
+@@ -5582,7 +5742,7 @@
+       echo "   NO-OP: $MT7921E_CONF is already managed and sets disable_aspm=1."
+     else
+       atomic_write "$MT7921E_CONF" 0644 << 'MT7921E_EOF'
+-# Managed by vivobook_optimize.sh v16 --with-mt7921e-aspm
++# Managed by vivobook_optimize.sh v16.1 --with-mt7921e-aspm
+ # MediaTek MT7902 (mt7921e): OPTIONAL fallback, staged on request. Use it only
+ # if the Wi-Fi link is unstable on the running kernel. disable_aspm=1 blocks
+ # PCIe L1.x on the Wi-Fi link; on the reference X1605VA it kept PC6/PC8/S0i3 at
+@@ -5620,34 +5780,38 @@
+     echo "   Your rule file was left untouched; no udev reload or re-trigger was issued."
+   else
+   atomic_write /etc/udev/rules.d/99-usb-autosuspend.rules 0644 << 'UDEV_USB_EOF'
+-# Managed by vivobook_optimize.sh v16 --with-usb-autosuspend
++# Managed by vivobook_optimize.sh v16.1 --with-usb-autosuspend
+ # Enable USB runtime autosuspend by default
+ ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{power/control}="auto"
+ 
+ # Exempt USB HID devices (class 03) globally from autosuspend to prevent
+ # keyboard/mouse/receiver input lag
+-ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="03", TEST=="../power/control", ATTR{../power/control}="on"
++ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="03", TEST=="../power/control", ATTR{../power/control}="on"
+ 
+ # Exempt USB Wireless / Bluetooth host controllers (class e0) from autosuspend
+ # to prevent Bluetooth mouse/keyboard/headset lag and disconnects
+-ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="e0", TEST=="../power/control", ATTR{../power/control}="on"
++ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="e0", TEST=="../power/control", ATTR{../power/control}="on"
+ 
+ # Exempt USB audio (bInterfaceClass 01) from autosuspend: avoid pops and
+ # delayed playback on DACs/headsets
+-ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="01", TEST=="../power/control", ATTR{../power/control}="on"
++ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="01", TEST=="../power/control", ATTR{../power/control}="on"
+ 
+ # Exempt UVC video (bInterfaceClass 0e) from autosuspend: avoid delayed first
+ # frames and dropped webcam opens
+-ACTION=="add", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="0e", TEST=="../power/control", ATTR{../power/control}="on"
++ACTION=="add|bind", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_interface", ATTR{bInterfaceClass}=="0e", TEST=="../power/control", ATTR{../power/control}="on"
+ UDEV_USB_EOF
+   chmod 0644 /etc/udev/rules.d/99-usb-autosuspend.rules
+ 
+   udevadm control --reload-rules 2>/dev/null || true
+-  # Rules match ACTION=="add"; re-trigger add-uevents so already-connected
+-  # devices adopt the policy immediately, no replug or reboot needed.
++  # A-02: driver binding may enable autosuspend after device addition.
++  # Settle device-add replay before interface-bind replay, so the default
++  # device rule cannot race and undo the interface exemptions.
+   udevadm trigger --subsystem-match=usb --action=add 2>/dev/null || true
++  udevadm settle 2>/dev/null || true
++  udevadm trigger --subsystem-match=usb --property-match=DEVTYPE=usb_interface --action=bind 2>/dev/null || true
++  udevadm settle 2>/dev/null || true
+   echo "   USB runtime autosuspend rules deployed and applied to already-connected devices"
+-  echo "   (udev trigger replays 'add' events; no replug/reboot required)."
++  echo "   (udev trigger replays 'add', then interface 'bind'; verify power/control)."
+   echo "   Exempt: USB HID (keyboard/mouse/receivers), Bluetooth/wireless controllers,"
+   echo "   USB audio (01) and UVC video (0e) — peripherals keep instant wake."
+   fi
+@@ -5716,9 +5880,10 @@
+   fi
+ 
+   # Write the dynamic helper script
+-  atomic_write /usr/local/bin/vivobook-power-switch.sh 0755 << 'POWER_SWITCH_EOF'
++  atomic_write /usr/local/bin/vivobook-power-switch.sh 0755 <<< "$(
++    cat << 'POWER_SWITCH_HEADER'
+ #!/usr/bin/env bash
+-# Managed by vivobook_optimize.sh v16 --with-auto-power
++# Managed by vivobook_optimize.sh v16.1 --with-auto-power
+ set -Eeuo pipefail
+ 
+ # Debounce: adapter connect/disconnect fires multiple power_supply udev events
+@@ -5736,19 +5901,14 @@
+ ANY_APPLIED=false
+ ANY_FAILED=false
+ 
+-# Detect AC / USB-PD power state
++# Shared read-only parsers/detection are emitted from the parent definitions.
++AUDIO_CONF=/etc/modprobe.d/audio-powersave.conf
++POWER_SWITCH_HEADER
++    declare -f is_external_power_online audio_staged_options audio_staged_opt battery_audio_timeout
++    cat << 'POWER_SWITCH_EOF'
++
+ AC=0
+-for supply in /sys/class/power_supply/*; do
+-  [[ -d "$supply" && -r "$supply/type" && -r "$supply/online" ]] || continue
+-  case "$(cat "$supply/type" 2>/dev/null || true)" in
+-    Mains|USB|USB_PD|USB_C)
+-      if [[ "$(cat "$supply/online" 2>/dev/null || echo 0)" == "1" ]]; then
+-        AC=1
+-        break
+-      fi
+-      ;;
+-  esac
+-done
++if is_external_power_online; then AC=1; fi
+ 
+ apply_epp() {
+   local val="$1" target applied=false reported="" f nodes=0 applied_nodes=0 _try
+@@ -5929,22 +6089,23 @@
+   apply_epp "balance_power"
+   apply_thermal "balanced"
+   apply_wifi_powersave "on"
+-  apply_audio_powersave 1
++  apply_audio_powersave "$(battery_audio_timeout)"
+ fi
+ 
+ # v15.3 (I-25): report every knob's real state in one line, and fail the unit
+ # only when something writable was present and every write to it was rejected.
+-echo "vivobook-power-switch v16: $POWER_LABEL — epp=${KNOB_STATE[epp]:-unknown} | thermal=${KNOB_STATE[thermal]:-unknown} | wifi_powersave=${KNOB_STATE[wifi_powersave]:-unknown} | audio_powersave=${KNOB_STATE[audio_powersave]:-unknown}"
++echo "vivobook-power-switch v16.1: $POWER_LABEL — epp=${KNOB_STATE[epp]:-unknown} | thermal=${KNOB_STATE[thermal]:-unknown} | wifi_powersave=${KNOB_STATE[wifi_powersave]:-unknown} | audio_powersave=${KNOB_STATE[audio_powersave]:-unknown}"
+ if [[ "$ANY_FAILED" == true && "$ANY_APPLIED" != true ]]; then
+-  echo "vivobook-power-switch v16: a writable control existed but every write to it failed." >&2
++  echo "vivobook-power-switch v16.1: a writable control existed but every write to it failed." >&2
+   exit 1
+ fi
+ POWER_SWITCH_EOF
++  )"
+   chmod 0755 /usr/local/bin/vivobook-power-switch.sh
+ 
+   # Create udev rule with systemd integration
+   atomic_write /etc/udev/rules.d/99-vivobook-power.rules 0644 << 'UDEV_EOF'
+-# Managed by vivobook_optimize.sh v16 --with-auto-power
++# Managed by vivobook_optimize.sh v16.1 --with-auto-power
+ # SYSTEMD_WANTS alone does not restart an already-active oneshot service.
+ # Queue a nonblocking restart on every adapter change; run tuning in systemd,
+ # never a long-running helper inside the udev worker.
+@@ -5953,9 +6114,9 @@
+ 
+   # Create systemd boot-time oneshot service
+   write_unit_file /etc/systemd/system/vivobook-power-switch.service 0644 << 'EOF'
+-# Managed by vivobook_optimize.sh v16
++# Managed by vivobook_optimize.sh v16.1
+ [Unit]
+-Description=Set ASUS Vivobook v16 AC/battery power profile
++Description=Set ASUS Vivobook v16.1 AC/battery power profile
+ After=basic.target asus-thermal-profile.service intel-epp-profile.service rapl-power-limits.service
+ After=NetworkManager.service systemd-sysctl.service
+ # v15.3 (I-05): ordering only, no Wants= (ignored when PPD is absent).
+@@ -5976,6 +6137,13 @@
+ 
+   systemctl daemon-reload
+   systemctl enable vivobook-power-switch.service
++  # A-05: never replace an administrator's hook. Restore removes only ours.
++  if [[ ! -e "$SLEEP_HOOK_DIR/vivobook-power-switch" && ! -L "$SLEEP_HOOK_DIR/vivobook-power-switch" ]] ||
++     is_managed_file "$SLEEP_HOOK_DIR/vivobook-power-switch"; then
++    atomic_write "$SLEEP_HOOK_DIR/vivobook-power-switch" 0755 <<< "$(sleep_hook_body vivobook-power-switch.service)"
++  else
++    echo "   SKIPPED: unmanaged power-switch resume hook preserved."
++  fi
+   udevadm control --reload-rules 2>/dev/null || true
+   if systemctl restart vivobook-power-switch.service; then
+     echo "   Dynamic power switching enabled: boot service + udev rule installed."
+@@ -5984,7 +6152,7 @@
+     echo "   Battery requests: balance_power EPP (power-saver via PPD), balanced thermal, Wi-Fi power save on."
+     echo "   Profiles apply via power-profiles-daemon when active; PPD then also owns"
+     echo "   the platform profile (direct sysfs thermal writes are skipped in that case)."
+-    echo "   Without PPD, profiles apply via sysfs directly. Audio power_save: 0 (AC) / 1 (battery)"
++    echo "   Without PPD, profiles apply via sysfs directly. Audio power_save: 0 (AC) / $(battery_audio_timeout) (battery)"
+     echo "   where snd_hda_intel exposes it — on the reference machine it is exposed alongside"
+     echo "   Intel SOF; the helper reports applied/unsupported per run."
+     echo "   The helper prints a per-knob state line (applied / unsupported / failed) and only"
+@@ -6142,7 +6310,7 @@
+     # value for it is NEVER invented (not from defaults, not from the live
+     # value, not from a guess).
+     atomic_write /etc/default/vivobook-rapl 0644 << EOF
+-# Managed by vivobook_optimize.sh v16
++# Managed by vivobook_optimize.sh v16.1
+ # PL1/PL2 in watts. An EMPTY value means: leave that constraint under
+ # firmware control — it is not written by the boot service.
+ PL1=${PL1:-}
+@@ -6152,7 +6320,7 @@
+ 
+     atomic_write /usr/local/bin/set-rapl-limits.sh 0755 << 'RAPL_EOF'
+ #!/usr/bin/env bash
+-# Managed by vivobook_optimize.sh v16
++# Managed by vivobook_optimize.sh v16.1
+ set -Eeuo pipefail
+ 
+ CONFIG="/etc/default/vivobook-rapl"
+@@ -6237,7 +6405,7 @@
+     chmod 0755 /usr/local/bin/set-rapl-limits.sh
+ 
+     write_unit_file /etc/systemd/system/rapl-power-limits.service 0644 << 'EOF'
+-# Managed by vivobook_optimize.sh v16
++# Managed by vivobook_optimize.sh v16.1
+ [Unit]
+ Description=Set Intel RAPL power limits (PL1/PL2)
+ After=basic.target
+@@ -6320,7 +6488,7 @@
+     # Write helper script
+     atomic_write /usr/local/bin/vivobook-kbd-timeout.sh 0755 << 'KBD_EOF'
+ #!/usr/bin/env bash
+-# Managed by vivobook_optimize.sh v16 --with-kbd-timeout
++# Managed by vivobook_optimize.sh v16.1 --with-kbd-timeout
+ set -Eeuo pipefail
+ 
+ KBD_LED=/sys/class/leds/asus::kbd_backlight
+@@ -6350,7 +6518,7 @@
+ 
+     # Create systemd service
+     write_unit_file /etc/systemd/system/vivobook-kbd-timeout.service 0644 << 'EOF'
+-# Managed by vivobook_optimize.sh v16
++# Managed by vivobook_optimize.sh v16.1
+ [Unit]
+ Description=Set keyboard backlight inactivity timeout (30s)
+ After=basic.target
+@@ -6389,7 +6557,7 @@
+ 
+ echo ""
+ echo "===================================================="
+-echo "Done — ASUS Vivobook Optimization Pass v16."
++echo "Done — ASUS Vivobook Optimization Pass v16.1."
+ echo "Flags this run:"
+ echo "  guc=$WITH_GUC"
+ echo "  auto-upgrade=$WITH_AUTO_UPGRADE maintenance-schedule=$MAINTENANCE_SCHEDULE"

@@ -1,3 +1,5 @@
+> Historical supplied audit, privacy-redacted. Its patch/cleanup proposals are superseded by docs/PATCH-REVIEW.md and the guarded cleanup tool; do not run its unconditional deletion block.
+
 vivobook_optimize_v16.sh (v16.0, JSON schema 3) is a well-engineered drift-correction pass over v15.3. Its 15 changes accurately reflect the major state transitions your ASUS Vivobook 16 X1605VA underwent on October 10, 2026: removing mt7921e disable_aspm=1 on mainline kernel 7.2.6-070206-generic (which unlocked PC6/PC8 and S0i3/SLP_S0 Modern Standby with 0 Wi-Fi errors), binding the xe DRM driver (0x8086:0xa7a8), applying PL2=45W while leaving firmware-locked PL1=200W untouched, and removing the battery charge cap.
 However, cross-referencing vivobook_optimize_v16.sh line-by-line against your live system state exposes 8 concrete bugs, hardware-path mismatches, and system-drift hazards that should be resolved in v16.1.
 Part 1: Deep-Dive Code Audit of vivobook_optimize_v16.sh
@@ -137,7 +139,7 @@ Part 3: Best Action Plan for Your Vivobook 16 X1605VA Right Now
 Based on your October 10, 2026 system description (ASUS Vivobook 16 X1605VA (1).md), your hardware and kernel (7.2.6-070206-generic) are already in an excellent baseline state (PC6/PC8/S0i3 working, xe forced, PL2=45W active, 0 Wi-Fi errors). However, your filesystem currently has 5 specific pieces of configuration drift left over from earlier sessions:
  * Duplicate Unmanaged BBR File (/etc/sysctl.d/99-bbr.conf): You have both /etc/sysctl.d/98-network-bbr.conf (managed) and /etc/sysctl.d/99-bbr.conf (unmanaged duplicate).
  * Orphaned Disabled Static Services & Sleep Hooks: battery-charge-threshold.service, asus-thermal-profile.service, and intel-epp-profile.service are disabled because vivobook-power-switch.service (--with-auto-power) dynamically manages your AC/battery profiles and your battery cap is removed (100%). Yet their orphaned sleep hooks (/usr/lib/systemd/system-sleep/vivobook-{battery,thermal-profile,intel-epp}) and /etc/default/vivobook-{thermal-profile,epp} files are still sitting on disk.
- * Stale Managed Browser Configs: ~/.config/chrome-flags.conf and ~/.config/chromium-flags.conf are sitting in /home/chaitu/.config/ even though only Brave is installed.
+ * Stale Managed Browser Configs: ~/.config/chrome-flags.conf and ~/.config/chromium-flags.conf are sitting in /home/<user>/<personal-path> even though only Brave is installed.
  * USB Autosuspend MISMATCH on Webcam (1-9) & Bluetooth (1-10): Both are currently stuck on power/control = auto because 99-usb-autosuspend.rules lacked ACTION=="add|bind".
  * Old Script Binary in /usr/local/bin/: /usr/local/bin/vivobook_optimize_v15.3.sh is still installed in /usr/local/bin/.
 Step-by-Step Execution Plan on Your Laptop
@@ -175,7 +177,7 @@ Step 2: Persist your exact optimal flags in /etc/vivobook-optimize/defaults.conf
 Your script automatically sources /etc/vivobook-optimize/defaults.conf before parsing CLI flags (line 169 of vivobook_optimize_v16.sh). Creating this file means you never have to remember which flags match your machine's configuration:
 sudo install -d -m 0755 /etc/vivobook-optimize
 sudo tee /etc/vivobook-optimize/defaults.conf >/dev/null << 'EOF'
-# Optimal baseline for chaitu's ASUS Vivobook 16 X1605VA (Kernel 7.2.6+)
+# Optimal baseline for <user>'s ASUS Vivobook 16 X1605VA (Kernel 7.2.6+)
 WITH_ZRAM=true
 WITH_AUTO_POWER=true
 PL2=45

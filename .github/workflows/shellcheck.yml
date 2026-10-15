@@ -1,0 +1,21 @@
+name: Shell checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install development tools
+        run: sudo apt-get update && sudo apt-get install -y shellcheck jq
+      - name: Bash syntax
+        run: bash -n vivobook_optimize.sh && bash -n vivobook_optimize_v16.1.sh
+      - name: ShellCheck
+        run: shellcheck vivobook_optimize.sh vivobook_optimize_v16.1.sh tools/*.sh tests/*.sh
+      - name: Release copies match
+        run: cmp vivobook_optimize.sh vivobook_optimize_v16.1.sh
+      - name: Read-only smoke and fixture regressions
+        run: bash tests/smoke.sh
